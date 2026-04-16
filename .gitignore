@@ -1,6 +1,9 @@
 cmake-build-*/
+*/cmake-build-*/
+build/
 .idea/
 venv/
 __pycache__/
 *.pyc
+*.log
 .DS_Store
