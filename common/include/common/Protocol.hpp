@@ -18,6 +18,8 @@ namespace common {
         SendMessage,
         IncomingMessage,
         FetchHistory,
+        HistoryMessage,
+        HistoryResult,
         Info,
         Error,
         Quit,

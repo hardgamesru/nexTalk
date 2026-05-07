@@ -42,6 +42,18 @@ send_message<TAB>bob<TAB>Привет
 1. получатель;
 2. текст сообщения.
 
+### fetch_history
+
+```text
+fetch_history<TAB>bob<TAB>20
+```
+
+Поля:
+
+1. пользователь, с которым нужно загрузить историю;
+2. лимит сообщений, необязательное поле. Если не передан, сервер использует
+   значение по умолчанию. Сервер ограничивает слишком большие значения.
+
 ### quit
 
 ```text
@@ -90,6 +102,34 @@ incoming_message<TAB>alice<TAB>Привет
 1. отправитель;
 2. текст сообщения.
 
+### history_message
+
+```text
+history_message<TAB>2026-05-07 12:00:00<TAB>alice<TAB>bob<TAB>Привет
+```
+
+Одно сообщение из истории диалога.
+
+Поля:
+
+1. время сохранения сообщения;
+2. отправитель;
+3. получатель;
+4. текст сообщения.
+
+### history_result
+
+```text
+history_result<TAB>ok<TAB>history with bob: 1 message(s)
+```
+
+Завершает ответ на `fetch_history`.
+
+Поля:
+
+1. статус: `ok` или `error`;
+2. описание результата.
+
 ## Пример обмена
 
 ```text
@@ -98,4 +138,7 @@ S -> C: login_result<TAB>ok<TAB>logged in as alice
 C -> S: send_message<TAB>bob<TAB>Привет
 S -> bob: incoming_message<TAB>alice<TAB>Привет
 S -> alice: info<TAB>delivered to bob
+C -> S: fetch_history<TAB>bob<TAB>20
+S -> C: history_message<TAB>2026-05-07 12:00:00<TAB>alice<TAB>bob<TAB>Привет
+S -> C: history_result<TAB>ok<TAB>history with bob: 1 message(s)
 ```

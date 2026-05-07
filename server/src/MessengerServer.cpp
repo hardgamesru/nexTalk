@@ -7,6 +7,7 @@
 #include <ctime>
 #include <iostream>
 #include <netinet/in.h>
+#include <limits>
 #include <sstream>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -16,6 +17,8 @@
 namespace {
     constexpr int kBacklog = 16;
     constexpr std::size_t kMaxLineLength = 8192;
+    constexpr int kDefaultHistoryLimit = 20;
+    constexpr int kMaxHistoryLimit = 100;
 
     // send() не обязан отправить всю строку за один вызов. Поэтому sendAll
     // повторяет отправку, пока все байты протокольного сообщения не уйдут в TCP.
@@ -24,6 +27,10 @@ namespace {
 
         while (sent < data.size()) {
             const ssize_t result = ::send(socket, data.data() + sent, data.size() - sent, 0);
+            if (result < 0 && errno == EINTR) {
+                continue;
+            }
+
             if (result <= 0) {
                 return false;
             }
@@ -75,12 +82,43 @@ namespace {
 
         return escaped;
     }
+
+    bool parsePositiveInt(const std::string& value, int& output) {
+        if (value.empty()) {
+            return false;
+        }
+
+        int result = 0;
+        for (char ch : value) {
+            if (ch < '0' || ch > '9') {
+                return false;
+            }
+
+            const int digit = ch - '0';
+            if (result > (std::numeric_limits<int>::max() - digit) / 10) {
+                return false;
+            }
+
+            result = result * 10 + digit;
+        }
+
+        if (result <= 0) {
+            return false;
+        }
+
+        output = result;
+        return true;
+    }
 }
 
-MessengerServer::MessengerServer(int port, std::string bindAddress, std::string logPath)
+MessengerServer::MessengerServer(int port,
+                                 std::string bindAddress,
+                                 std::string logPath,
+                                 std::string dbPath)
     : port_(port),
       bindAddress_(std::move(bindAddress)),
-      logPath_(std::move(logPath)) {
+      logPath_(std::move(logPath)),
+      dbPath_(std::move(dbPath)) {
 }
 
 MessengerServer::~MessengerServer() {
@@ -93,6 +131,12 @@ bool MessengerServer::start() {
     logFile_.open(logPath_, std::ios::app);
     if (!logFile_) {
         std::cerr << "Cannot open log file: " << logPath_ << '\n';
+        return false;
+    }
+
+    std::string storageError;
+    if (!messageStore_.open(dbPath_, storageError)) {
+        std::cerr << "Cannot open database: " << dbPath_ << ": " << storageError << '\n';
         return false;
     }
 
@@ -136,7 +180,9 @@ bool MessengerServer::start() {
     }
 
     running_ = true;
-    logEvent("server_started port=" + std::to_string(port_) + " bind=" + bindAddress_);
+    logEvent("server_started port=" + std::to_string(port_) +
+             " bind=" + bindAddress_ +
+             " db=" + dbPath_);
     std::cout << "NexTalk server listening on " << bindAddress_ << ':' << port_ << '\n';
     return true;
 }
@@ -325,6 +371,9 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::SendMessage:
             handleSendMessage(session, message);
             break;
+        case common::CommandType::FetchHistory:
+            handleFetchHistory(session, message);
+            break;
         case common::CommandType::Quit:
             sendToSession(session, {common::CommandType::Info, {"bye"}});
             session->active = false;
@@ -346,6 +395,14 @@ void MessengerServer::handleLogin(const std::shared_ptr<ClientSession>& session,
     }
 
     const std::string username = message.fields[0];
+
+    std::string storageError;
+    if (!messageStore_.ensureUser(username, storageError)) {
+        logEvent("user_login_storage_failed username=" + username +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::LoginResult, {"error", "storage error"}});
+        return;
+    }
 
     {
         // onlineUsers_ общий для всех клиентских потоков. Например, один поток
@@ -376,7 +433,7 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         return;
     }
 
-    if (message.fields.size() != 2 || message.fields[0].empty() || message.fields[1].empty()) {
+    if (message.fields.size() != 2 || !isValidUsername(message.fields[0]) || message.fields[1].empty()) {
         sendToSession(session, {common::CommandType::Error, {"usage: /msg <user> <text>"}});
         return;
     }
@@ -412,8 +469,67 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         return;
     }
 
+    std::string storageError;
+    if (!messageStore_.saveMessage(session->username, recipientName, text, storageError)) {
+        logEvent("message_store_failed from=" + session->username +
+                 " to=" + recipientName +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::Info,
+                                {"delivered to " + recipientName + " (history save failed)"}});
+        return;
+    }
+
     sendToSession(session, {common::CommandType::Info, {"delivered to " + recipientName}});
     logEvent("message_delivered from=" + session->username + " to=" + recipientName);
+}
+
+void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& session,
+                                         const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    if (message.fields.empty() || message.fields.size() > 2 || !isValidUsername(message.fields[0])) {
+        sendToSession(session, {common::CommandType::Error, {"usage: /history <user> [limit]"}});
+        return;
+    }
+
+    int limit = kDefaultHistoryLimit;
+    if (message.fields.size() == 2) {
+        if (!parsePositiveInt(message.fields[1], limit)) {
+            sendToSession(session, {common::CommandType::Error, {"history limit must be a positive number"}});
+            return;
+        }
+    }
+
+    if (limit > kMaxHistoryLimit) {
+        limit = kMaxHistoryLimit;
+    }
+
+    std::vector<StoredMessage> history;
+    std::string storageError;
+    if (!messageStore_.fetchHistory(session->username, message.fields[0], limit, history, storageError)) {
+        logEvent("history_fetch_failed user=" + session->username +
+                 " peer=" + message.fields[0] +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::HistoryResult, {"error", "storage error"}});
+        return;
+    }
+
+    for (const auto& item : history) {
+        sendToSession(session, {common::CommandType::HistoryMessage,
+                                {item.createdAt, item.sender, item.recipient, item.text}});
+    }
+
+    sendToSession(session, {common::CommandType::HistoryResult,
+                            {"ok",
+                             "history with " + message.fields[0] + ": " +
+                                 std::to_string(history.size()) + " message(s)"}});
+
+    logEvent("history_fetched user=" + session->username +
+             " peer=" + message.fields[0] +
+             " count=" + std::to_string(history.size()));
 }
 
 void MessengerServer::removeSession(const std::shared_ptr<ClientSession>& session) {

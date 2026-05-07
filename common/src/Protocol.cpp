@@ -80,6 +80,8 @@ namespace common {
         case CommandType::SendMessage: return "send_message";
         case CommandType::IncomingMessage: return "incoming_message";
         case CommandType::FetchHistory: return "fetch_history";
+        case CommandType::HistoryMessage: return "history_message";
+        case CommandType::HistoryResult: return "history_result";
         case CommandType::Info: return "info";
         case CommandType::Error: return "error";
         case CommandType::Quit: return "quit";
@@ -95,6 +97,8 @@ namespace common {
         if (value == "send_message") return CommandType::SendMessage;
         if (value == "incoming_message") return CommandType::IncomingMessage;
         if (value == "fetch_history") return CommandType::FetchHistory;
+        if (value == "history_message") return CommandType::HistoryMessage;
+        if (value == "history_result") return CommandType::HistoryResult;
         if (value == "info") return CommandType::Info;
         if (value == "error") return CommandType::Error;
         if (value == "quit") return CommandType::Quit;

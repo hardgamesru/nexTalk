@@ -21,12 +21,23 @@ namespace {
     std::mutex g_outputMutex;
 
     int parsePort(const char* value) {
-        const int port = std::atoi(value);
-        if (port <= 0 || port > 65535) {
+        if (!value || value[0] == '\0') {
             return -1;
         }
 
-        return port;
+        int port = 0;
+        for (const char* current = value; *current != '\0'; ++current) {
+            if (*current < '0' || *current > '9') {
+                return -1;
+            }
+
+            port = port * 10 + (*current - '0');
+            if (port > 65535) {
+                return -1;
+            }
+        }
+
+        return port > 0 ? port : -1;
     }
 
     bool sendAll(int socket, const std::string& data) {
@@ -36,6 +47,10 @@ namespace {
         // вся строка протокола будет записана в TCP-соединение.
         while (sent < data.size()) {
             const ssize_t result = ::send(socket, data.data() + sent, data.size() - sent, 0);
+            if (result < 0 && errno == EINTR) {
+                continue;
+            }
+
             if (result <= 0) {
                 return false;
             }
@@ -120,6 +135,7 @@ namespace {
         std::cout
             << "Commands:\n"
             << "  /msg <user> <text>  send private message\n"
+            << "  /history <user> [n] show recent messages with user\n"
             << "  /login <user>       change login\n"
             << "  /help               show commands\n"
             << "  /quit               exit\n";
@@ -159,6 +175,19 @@ namespace {
             case common::CommandType::IncomingMessage:
                 if (message.fields.size() >= 2) {
                     std::cout << "\n[from " << message.fields[0] << "] " << message.fields[1] << '\n';
+                }
+                break;
+            case common::CommandType::HistoryMessage:
+                if (message.fields.size() >= 4) {
+                    std::cout << "\n[history " << message.fields[0] << "] "
+                              << message.fields[1] << " -> " << message.fields[2]
+                              << ": " << message.fields[3] << '\n';
+                }
+                break;
+            case common::CommandType::HistoryResult:
+                if (message.fields.size() >= 2) {
+                    std::cout << "\n[history] " << message.fields[0] << ": "
+                              << message.fields[1] << '\n';
                 }
                 break;
             case common::CommandType::Error:
@@ -309,6 +338,36 @@ int main(int argc, char* argv[]) {
             const std::string recipient = rest.substr(0, separator);
             const std::string text = rest.substr(separator + 1);
             sendMessage(socket, {common::CommandType::SendMessage, {recipient, text}});
+
+            std::lock_guard<std::mutex> lock(g_outputMutex);
+            printPrompt();
+            continue;
+        }
+
+        if (startsWith(input, "/history ")) {
+            const std::string rest = input.substr(9);
+            const std::size_t separator = rest.find(' ');
+            if (rest.empty()) {
+                std::lock_guard<std::mutex> lock(g_outputMutex);
+                std::cout << "Usage: /history <user> [limit]\n";
+                printPrompt();
+                continue;
+            }
+
+            if (separator == std::string::npos) {
+                sendMessage(socket, {common::CommandType::FetchHistory, {rest}});
+            } else {
+                const std::string peer = rest.substr(0, separator);
+                const std::string limit = rest.substr(separator + 1);
+                if (peer.empty() || limit.empty()) {
+                    std::lock_guard<std::mutex> lock(g_outputMutex);
+                    std::cout << "Usage: /history <user> [limit]\n";
+                    printPrompt();
+                    continue;
+                }
+
+                sendMessage(socket, {common::CommandType::FetchHistory, {peer, limit}});
+            }
 
             std::lock_guard<std::mutex> lock(g_outputMutex);
             printPrompt();

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "common/Protocol.hpp"
+#include "MessageStore.hpp"
 
 /**
  * TCP-сервер мессенджера.
@@ -24,7 +25,7 @@
  */
 class MessengerServer {
 public:
-    MessengerServer(int port, std::string bindAddress, std::string logPath);
+    MessengerServer(int port, std::string bindAddress, std::string logPath, std::string dbPath);
     ~MessengerServer();
 
     MessengerServer(const MessengerServer&) = delete;
@@ -89,6 +90,13 @@ private:
                            const common::ProtocolMessage& message);
 
     /**
+     * Обрабатывает команду fetch_history и отправляет клиенту последние
+     * сообщения из SQLite.
+     */
+    void handleFetchHistory(const std::shared_ptr<ClientSession>& session,
+                            const common::ProtocolMessage& message);
+
+    /**
      * Удаляет сессию из таблицы онлайн-пользователей и закрывает ее сокет.
      */
     void removeSession(const std::shared_ptr<ClientSession>& session);
@@ -108,11 +116,13 @@ private:
     int port_;
     std::string bindAddress_;
     std::string logPath_;
+    std::string dbPath_;
     int listenSocket_{-1};
     std::atomic<bool> running_{false};
 
     std::ofstream logFile_;
     std::mutex logMutex_;
+    MessageStore messageStore_;
 
     // Таблица "имя пользователя -> активная сессия". По ней сервер ищет, куда
     // доставлять личные сообщения. Доступ защищен clientsMutex_.
