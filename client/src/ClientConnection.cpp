@@ -1,0 +1,266 @@
+#include "client/ClientConnection.hpp"
+
+#include <cerrno>
+#include <cstring>
+#include <netdb.h>
+#include <sys/socket.h>
+#include <unistd.h>
+#include <utility>
+
+namespace client {
+namespace {
+    constexpr std::size_t kMaxLineLength = 8192;
+
+    int openConnection(const std::string& host, int port, std::string& error) {
+        addrinfo hints{};
+        hints.ai_family = AF_UNSPEC;
+        hints.ai_socktype = SOCK_STREAM;
+
+        addrinfo* results = nullptr;
+        const std::string service = std::to_string(port);
+        const int lookup = ::getaddrinfo(host.c_str(), service.c_str(), &hints, &results);
+        if (lookup != 0) {
+            error = gai_strerror(lookup);
+            return -1;
+        }
+
+        int socket = -1;
+        for (addrinfo* current = results; current != nullptr; current = current->ai_next) {
+            socket = ::socket(current->ai_family, current->ai_socktype, current->ai_protocol);
+            if (socket < 0) {
+                continue;
+            }
+
+            if (::connect(socket, current->ai_addr, current->ai_addrlen) == 0) {
+                break;
+            }
+
+            ::close(socket);
+            socket = -1;
+        }
+
+        ::freeaddrinfo(results);
+
+        if (socket < 0 && error.empty()) {
+            error = "cannot connect to " + host + ':' + std::to_string(port);
+        }
+
+        return socket;
+    }
+}
+
+ClientConnection::ClientConnection() = default;
+
+ClientConnection::~ClientConnection() {
+    stop();
+}
+
+void ClientConnection::setCallbacks(Callbacks callbacks) {
+    std::lock_guard<std::mutex> lock(callbacksMutex_);
+    callbacks_ = std::move(callbacks);
+}
+
+bool ClientConnection::connectToServer(const std::string& host, int port, std::string& error) {
+    if (running_) {
+        error = "connection is already active";
+        return false;
+    }
+
+    if (receiverThread_.joinable() &&
+        receiverThread_.get_id() != std::this_thread::get_id()) {
+        receiverThread_.join();
+    }
+
+    if (socket_ >= 0) {
+        ::close(socket_);
+        socket_ = -1;
+    }
+
+    socket_ = openConnection(host, port, error);
+    if (socket_ < 0) {
+        return false;
+    }
+
+    running_ = true;
+    receiverThread_ = std::thread(&ClientConnection::receiverLoop, this);
+    return true;
+}
+
+void ClientConnection::stop() {
+    const bool wasRunning = running_.exchange(false);
+    if (socket_ >= 0) {
+        ::shutdown(socket_, SHUT_RDWR);
+    }
+
+    if (receiverThread_.joinable() &&
+        receiverThread_.get_id() != std::this_thread::get_id()) {
+        receiverThread_.join();
+    }
+
+    if (socket_ >= 0) {
+        ::close(socket_);
+        socket_ = -1;
+    }
+
+    (void)wasRunning;
+}
+
+bool ClientConnection::isRunning() const {
+    return running_;
+}
+
+bool ClientConnection::login(const std::string& username) {
+    return sendMessage({common::CommandType::Login, {username}});
+}
+
+bool ClientConnection::sendPrivateMessage(const std::string& recipient, const std::string& text) {
+    return sendMessage({common::CommandType::SendMessage, {recipient, text}});
+}
+
+bool ClientConnection::fetchHistory(const std::string& peer, const std::string& limit) {
+    if (limit.empty()) {
+        return sendMessage({common::CommandType::FetchHistory, {peer}});
+    }
+
+    return sendMessage({common::CommandType::FetchHistory, {peer, limit}});
+}
+
+bool ClientConnection::quit() {
+    return sendMessage({common::CommandType::Quit, {}});
+}
+
+bool ClientConnection::sendMessage(const common::ProtocolMessage& message) {
+    if (!running_) {
+        return false;
+    }
+
+    return sendAll(common::serializeMessage(message));
+}
+
+bool ClientConnection::sendAll(const std::string& data) {
+    std::lock_guard<std::mutex> lock(writeMutex_);
+
+    if (socket_ < 0) {
+        return false;
+    }
+
+    std::size_t sent = 0;
+    while (sent < data.size()) {
+        const ssize_t result = ::send(socket_, data.data() + sent, data.size() - sent, 0);
+        if (result < 0 && errno == EINTR) {
+            continue;
+        }
+
+        if (result <= 0) {
+            return false;
+        }
+
+        sent += static_cast<std::size_t>(result);
+    }
+
+    return true;
+}
+
+bool ClientConnection::readLine(std::string& line) {
+    line.clear();
+    char ch = '\0';
+
+    while (line.size() < kMaxLineLength) {
+        const ssize_t result = ::recv(socket_, &ch, 1, 0);
+        if (result == 0) {
+            return false;
+        }
+
+        if (result < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+
+            return false;
+        }
+
+        line += ch;
+        if (ch == '\n') {
+            return true;
+        }
+    }
+
+    return false;
+}
+
+void ClientConnection::receiverLoop() {
+    std::string line;
+
+    while (running_ && readLine(line)) {
+        common::ProtocolMessage message;
+        if (!common::parseMessage(line, message)) {
+            auto callbacks = callbacksSnapshot();
+            if (callbacks.onProtocolError) {
+                callbacks.onProtocolError("invalid protocol message");
+            }
+            continue;
+        }
+
+        handleServerMessage(message);
+    }
+
+    running_ = false;
+    auto callbacks = callbacksSnapshot();
+    if (callbacks.onDisconnected) {
+        callbacks.onDisconnected();
+    }
+}
+
+void ClientConnection::handleServerMessage(const common::ProtocolMessage& message) {
+    auto callbacks = callbacksSnapshot();
+
+    switch (message.type) {
+    case common::CommandType::Info:
+        if (!message.fields.empty() && callbacks.onInfo) {
+            callbacks.onInfo(message.fields[0]);
+        }
+        break;
+    case common::CommandType::LoginResult:
+        if (message.fields.size() >= 2 && callbacks.onLoginResult) {
+            callbacks.onLoginResult(message.fields[0], message.fields[1]);
+        }
+        break;
+    case common::CommandType::IncomingMessage:
+        if (message.fields.size() >= 2 && callbacks.onIncomingMessage) {
+            callbacks.onIncomingMessage(message.fields[0], message.fields[1]);
+        }
+        break;
+    case common::CommandType::HistoryMessage:
+        if (message.fields.size() >= 4 && callbacks.onHistoryMessage) {
+            callbacks.onHistoryMessage({
+                message.fields[0],
+                message.fields[1],
+                message.fields[2],
+                message.fields[3]
+            });
+        }
+        break;
+    case common::CommandType::HistoryResult:
+        if (message.fields.size() >= 2 && callbacks.onHistoryResult) {
+            callbacks.onHistoryResult(message.fields[0], message.fields[1]);
+        }
+        break;
+    case common::CommandType::Error:
+        if (!message.fields.empty() && callbacks.onError) {
+            callbacks.onError(message.fields[0]);
+        }
+        break;
+    default:
+        if (callbacks.onProtocolError) {
+            callbacks.onProtocolError("unsupported server message");
+        }
+        break;
+    }
+}
+
+ClientConnection::Callbacks ClientConnection::callbacksSnapshot() {
+    std::lock_guard<std::mutex> lock(callbacksMutex_);
+    return callbacks_;
+}
+
+}
