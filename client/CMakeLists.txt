@@ -17,6 +17,7 @@ if(BUILD_QT_CLIENT)
     if(Qt6_FOUND)
         add_executable(nextalk_gui
                 src/ClientConnection.cpp
+                src/qt/AuthDialog.cpp
                 src/qt/MainWindow.cpp
                 src/qt/main.cpp
         )

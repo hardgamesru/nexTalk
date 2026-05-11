@@ -25,7 +25,8 @@ NexTalk - учебный клиент-серверный мессенджер н
 зависит от Qt, консоли или другого конкретного интерфейса. Он отвечает за:
 
 - подключение к серверу;
-- отправку `login`, `send_message`, `fetch_history`, `quit`;
+- отправку `login`, `send_message`, `fetch_history`, `fetch_chats`,
+  `search_users`, `create_chat`, `quit`;
 - запуск receiver thread;
 - разбор входящих сообщений сервера;
 - вызов typed callbacks для UI-слоя.
@@ -71,16 +72,26 @@ TCP передает поток байтов, а не готовые сообщ�
 Поддержанные команды клиента:
 
 - `login` - вход или смена имени пользователя;
+- `register` - создание аккаунта с паролем;
 - `send_message` - личное сообщение другому онлайн-пользователю;
 - `fetch_history` - запрос истории личного диалога;
+- `fetch_chats` - запрос списка диалогов;
+- `search_users` - поиск пользователей по части имени; сервер исключает уже
+  существующие диалоги через id пользователей;
+- `create_chat` - создание пустого личного диалога по id пользователя;
 - `quit` - завершение сессии.
 
 Ответы и события сервера:
 
 - `login_result` - результат входа;
+- `register_result` - результат регистрации;
 - `incoming_message` - входящее личное сообщение;
 - `history_message` - одна запись из истории;
 - `history_result` - завершение выдачи истории;
+- `chat_item` - один диалог в списке чатов;
+- `chat_list_result` - завершение выдачи списка чатов;
+- `user_search_item` / `user_search_result` - выдача результатов поиска;
+- `create_chat_result` - результат создания пустого диалога;
 - `info` - информационное сообщение;
 - `error` - ошибка.
 
@@ -151,6 +162,8 @@ SQLite вынесен в отдельный класс `MessageStore`. Серв�
 ```sql
 id INTEGER PRIMARY KEY AUTOINCREMENT
 username TEXT NOT NULL UNIQUE
+password_salt TEXT
+password_hash TEXT
 created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 ```
 
@@ -183,8 +196,9 @@ created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 FOREIGN KEY(conversation_id) REFERENCES conversations(id)
 ```
 
-История сейчас хранит только доставленные личные сообщения. Offline-очереди
-сообщений пока нет.
+Сообщения сохраняются в SQLite до попытки online-доставки. Если получатель
+offline, сообщение остается доступным в истории и появится в списке чатов после
+следующего входа пользователя.
 
 ## Логи и завершение
 

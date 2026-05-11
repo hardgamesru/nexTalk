@@ -17,6 +17,19 @@ struct HistoryItem {
     std::string text;
 };
 
+struct ChatSummary {
+    std::string peerId;
+    std::string peer;
+    std::string lastAt;
+    std::string lastSender;
+    std::string lastText;
+};
+
+struct UserSearchItem {
+    std::string id;
+    std::string username;
+};
+
 /**
  * Reusable TCP client for NexTalk.
  *
@@ -29,10 +42,20 @@ public:
     struct Callbacks {
         std::function<void(const std::string&)> onInfo;
         std::function<void(const std::string&)> onError;
+        std::function<void(const std::string& status, const std::string& text)> onRegisterResult;
         std::function<void(const std::string& status, const std::string& text)> onLoginResult;
         std::function<void(const std::string& sender, const std::string& text)> onIncomingMessage;
         std::function<void(const HistoryItem& item)> onHistoryMessage;
         std::function<void(const std::string& status, const std::string& text)> onHistoryResult;
+        std::function<void(const ChatSummary& chat)> onChatItem;
+        std::function<void(const std::string& status, const std::string& text)> onChatListResult;
+        std::function<void(const std::string& query, const UserSearchItem& user)> onUserSearchItem;
+        std::function<void(const std::string& status,
+                           const std::string& text,
+                           const std::string& query)> onUserSearchResult;
+        std::function<void(const std::string& status,
+                           const std::string& peerId,
+                           const std::string& text)> onCreateChatResult;
         std::function<void(const std::string& text)> onProtocolError;
         std::function<void()> onDisconnected;
     };
@@ -49,9 +72,13 @@ public:
     void stop();
 
     bool isRunning() const;
-    bool login(const std::string& username);
+    bool registerAccount(const std::string& username, const std::string& password);
+    bool login(const std::string& username, const std::string& password);
     bool sendPrivateMessage(const std::string& recipient, const std::string& text);
     bool fetchHistory(const std::string& peer, const std::string& limit = "");
+    bool fetchChats();
+    bool searchUsers(const std::string& query);
+    bool createChat(const std::string& peerId);
     bool quit();
 
 private:

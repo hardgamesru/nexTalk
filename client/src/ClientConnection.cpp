@@ -109,8 +109,12 @@ bool ClientConnection::isRunning() const {
     return running_;
 }
 
-bool ClientConnection::login(const std::string& username) {
-    return sendMessage({common::CommandType::Login, {username}});
+bool ClientConnection::registerAccount(const std::string& username, const std::string& password) {
+    return sendMessage({common::CommandType::Register, {username, password}});
+}
+
+bool ClientConnection::login(const std::string& username, const std::string& password) {
+    return sendMessage({common::CommandType::Login, {username, password}});
 }
 
 bool ClientConnection::sendPrivateMessage(const std::string& recipient, const std::string& text) {
@@ -123,6 +127,18 @@ bool ClientConnection::fetchHistory(const std::string& peer, const std::string& 
     }
 
     return sendMessage({common::CommandType::FetchHistory, {peer, limit}});
+}
+
+bool ClientConnection::fetchChats() {
+    return sendMessage({common::CommandType::FetchChats, {}});
+}
+
+bool ClientConnection::searchUsers(const std::string& query) {
+    return sendMessage({common::CommandType::SearchUsers, {query}});
+}
+
+bool ClientConnection::createChat(const std::string& peerId) {
+    return sendMessage({common::CommandType::CreateChat, {peerId}});
 }
 
 bool ClientConnection::quit() {
@@ -225,6 +241,11 @@ void ClientConnection::handleServerMessage(const common::ProtocolMessage& messag
             callbacks.onLoginResult(message.fields[0], message.fields[1]);
         }
         break;
+    case common::CommandType::RegisterResult:
+        if (message.fields.size() >= 2 && callbacks.onRegisterResult) {
+            callbacks.onRegisterResult(message.fields[0], message.fields[1]);
+        }
+        break;
     case common::CommandType::IncomingMessage:
         if (message.fields.size() >= 2 && callbacks.onIncomingMessage) {
             callbacks.onIncomingMessage(message.fields[0], message.fields[1]);
@@ -243,6 +264,39 @@ void ClientConnection::handleServerMessage(const common::ProtocolMessage& messag
     case common::CommandType::HistoryResult:
         if (message.fields.size() >= 2 && callbacks.onHistoryResult) {
             callbacks.onHistoryResult(message.fields[0], message.fields[1]);
+        }
+        break;
+    case common::CommandType::ChatItem:
+        if (message.fields.size() >= 5 && callbacks.onChatItem) {
+            callbacks.onChatItem({
+                message.fields[0],
+                message.fields[1],
+                message.fields[2],
+                message.fields[3],
+                message.fields[4]
+            });
+        }
+        break;
+    case common::CommandType::ChatListResult:
+        if (message.fields.size() >= 2 && callbacks.onChatListResult) {
+            callbacks.onChatListResult(message.fields[0], message.fields[1]);
+        }
+        break;
+    case common::CommandType::UserSearchItem:
+        if (message.fields.size() >= 3 && callbacks.onUserSearchItem) {
+            callbacks.onUserSearchItem(message.fields[0], {message.fields[1], message.fields[2]});
+        }
+        break;
+    case common::CommandType::UserSearchResult:
+        if (message.fields.size() >= 3 && callbacks.onUserSearchResult) {
+            callbacks.onUserSearchResult(message.fields[0], message.fields[1], message.fields[2]);
+        }
+        break;
+    case common::CommandType::CreateChatResult:
+        if (message.fields.size() >= 2 && callbacks.onCreateChatResult) {
+            const std::string peerId = message.fields.size() >= 3 ? message.fields[1] : "";
+            const std::string text = message.fields.size() >= 3 ? message.fields[2] : message.fields[1];
+            callbacks.onCreateChatResult(message.fields[0], peerId, text);
         }
         break;
     case common::CommandType::Error:

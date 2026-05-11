@@ -5,9 +5,11 @@
 #include <chrono>
 #include <cstring>
 #include <ctime>
+#include <iomanip>
 #include <iostream>
 #include <netinet/in.h>
 #include <limits>
+#include <random>
 #include <sstream>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -19,6 +21,7 @@ namespace {
     constexpr std::size_t kMaxLineLength = 8192;
     constexpr int kDefaultHistoryLimit = 20;
     constexpr int kMaxHistoryLimit = 100;
+    constexpr int kMaxUserSearchResults = 20;
 
     // send() не обязан отправить всю строку за один вызов. Поэтому sendAll
     // повторяет отправку, пока все байты протокольного сообщения не уйдут в TCP.
@@ -96,6 +99,33 @@ namespace {
 
             const int digit = ch - '0';
             if (result > (std::numeric_limits<int>::max() - digit) / 10) {
+                return false;
+            }
+
+            result = result * 10 + digit;
+        }
+
+        if (result <= 0) {
+            return false;
+        }
+
+        output = result;
+        return true;
+    }
+
+    bool parsePositiveInt64(const std::string& value, long long& output) {
+        if (value.empty()) {
+            return false;
+        }
+
+        long long result = 0;
+        for (char ch : value) {
+            if (ch < '0' || ch > '9') {
+                return false;
+            }
+
+            const int digit = ch - '0';
+            if (result > (std::numeric_limits<long long>::max() - digit) / 10) {
                 return false;
             }
 
@@ -365,6 +395,9 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         }
 
         switch (message.type) {
+        case common::CommandType::Register:
+            handleRegister(session, message);
+            break;
         case common::CommandType::Login:
             handleLogin(session, message);
             break;
@@ -373,6 +406,15 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
             break;
         case common::CommandType::FetchHistory:
             handleFetchHistory(session, message);
+            break;
+        case common::CommandType::FetchChats:
+            handleFetchChats(session, message);
+            break;
+        case common::CommandType::SearchUsers:
+            handleSearchUsers(session, message);
+            break;
+        case common::CommandType::CreateChat:
+            handleCreateChat(session, message);
             break;
         case common::CommandType::Quit:
             sendToSession(session, {common::CommandType::Info, {"bye"}});
@@ -389,18 +431,39 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
 
 void MessengerServer::handleLogin(const std::shared_ptr<ClientSession>& session,
                                   const common::ProtocolMessage& message) {
-    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
-        sendToSession(session, {common::CommandType::LoginResult, {"error", "invalid username"}});
+    if (message.fields.size() != 2 || !isValidUsername(message.fields[0])) {
+        sendToSession(session, {common::CommandType::LoginResult, {"error", "invalid username or password"}});
         return;
     }
 
     const std::string username = message.fields[0];
+    const std::string password = message.fields[1];
 
     std::string storageError;
-    if (!messageStore_.ensureUser(username, storageError)) {
+    std::string salt;
+    if (!messageStore_.loadPasswordSalt(username, salt, storageError)) {
         logEvent("user_login_storage_failed username=" + username +
                  " error=\"" + escapeLogField(storageError) + "\"");
         sendToSession(session, {common::CommandType::LoginResult, {"error", "storage error"}});
+        return;
+    }
+
+    if (salt.empty()) {
+        sendToSession(session, {common::CommandType::LoginResult, {"error", "unknown user"}});
+        return;
+    }
+
+    bool authenticated = false;
+    if (!messageStore_.authenticateUser(username, passwordHash(password, salt), authenticated, storageError)) {
+        logEvent("user_login_storage_failed username=" + username +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::LoginResult, {"error", "storage error"}});
+        return;
+    }
+
+    if (!authenticated) {
+        sendToSession(session, {common::CommandType::LoginResult, {"error", "invalid password"}});
+        logEvent("user_login_failed username=" + username + " peer=" + session->peer);
         return;
     }
 
@@ -424,6 +487,33 @@ void MessengerServer::handleLogin(const std::shared_ptr<ClientSession>& session,
 
     logEvent("user_login username=" + username + " peer=" + session->peer);
     sendToSession(session, {common::CommandType::LoginResult, {"ok", "logged in as " + username}});
+    handleFetchChats(session, {common::CommandType::FetchChats, {}});
+}
+
+void MessengerServer::handleRegister(const std::shared_ptr<ClientSession>& session,
+                                     const common::ProtocolMessage& message) {
+    if (message.fields.size() != 2 || !isValidUsername(message.fields[0]) ||
+        !isValidPassword(message.fields[1])) {
+        sendToSession(session, {common::CommandType::RegisterResult,
+                                {"error", "username must be 1-32 chars; password must be at least 4 chars"}});
+        return;
+    }
+
+    const std::string username = message.fields[0];
+    const std::string salt = generatePasswordSalt();
+    const std::string hash = passwordHash(message.fields[1], salt);
+
+    std::string storageError;
+    if (!messageStore_.registerUser(username, salt, hash, storageError)) {
+        sendToSession(session, {common::CommandType::RegisterResult, {"error", storageError}});
+        logEvent("user_register_failed username=" + username +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        return;
+    }
+
+    logEvent("user_registered username=" + username + " peer=" + session->peer);
+    sendToSession(session, {common::CommandType::RegisterResult,
+                            {"ok", "account created for " + username}});
 }
 
 void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& session,
@@ -457,30 +547,32 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
              " to=" + recipientName +
              " text=\"" + escapeLogField(text) + "\"");
 
-    if (!recipient) {
-        sendToSession(session, {common::CommandType::Error, {"user is offline: " + recipientName}});
-        logEvent("message_not_delivered from=" + session->username + " to=" + recipientName);
-        return;
-    }
-
-    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, {session->username, text}})) {
-        sendToSession(session, {common::CommandType::Error, {"delivery failed"}});
-        logEvent("message_delivery_failed from=" + session->username + " to=" + recipientName);
-        return;
-    }
-
     std::string storageError;
     if (!messageStore_.saveMessage(session->username, recipientName, text, storageError)) {
         logEvent("message_store_failed from=" + session->username +
                  " to=" + recipientName +
                  " error=\"" + escapeLogField(storageError) + "\"");
-        sendToSession(session, {common::CommandType::Info,
-                                {"delivered to " + recipientName + " (history save failed)"}});
+        sendToSession(session, {common::CommandType::Error, {storageError}});
+        return;
+    }
+
+    if (!recipient) {
+        sendToSession(session, {common::CommandType::Info, {"saved for offline user " + recipientName}});
+        logEvent("message_saved_offline from=" + session->username + " to=" + recipientName);
+        handleFetchChats(session, {common::CommandType::FetchChats, {}});
+        return;
+    }
+
+    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, {session->username, text}})) {
+        sendToSession(session, {common::CommandType::Info, {"saved; delivery will be available in history"}});
+        logEvent("message_delivery_failed_saved from=" + session->username + " to=" + recipientName);
         return;
     }
 
     sendToSession(session, {common::CommandType::Info, {"delivered to " + recipientName}});
     logEvent("message_delivered from=" + session->username + " to=" + recipientName);
+    handleFetchChats(session, {common::CommandType::FetchChats, {}});
+    handleFetchChats(recipient, {common::CommandType::FetchChats, {}});
 }
 
 void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& session,
@@ -530,6 +622,95 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
     logEvent("history_fetched user=" + session->username +
              " peer=" + message.fields[0] +
              " count=" + std::to_string(history.size()));
+}
+
+void MessengerServer::handleFetchChats(const std::shared_ptr<ClientSession>& session,
+                                       const common::ProtocolMessage&) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    std::vector<ChatSummary> chats;
+    std::string storageError;
+    if (!messageStore_.fetchChats(session->username, chats, storageError)) {
+        logEvent("chat_list_failed user=" + session->username +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::ChatListResult, {"error", "storage error"}});
+        return;
+    }
+
+    for (const auto& chat : chats) {
+        sendToSession(session, {common::CommandType::ChatItem,
+                                {chat.peerId, chat.peer, chat.lastAt, chat.lastSender, chat.lastText}});
+    }
+
+    sendToSession(session, {common::CommandType::ChatListResult,
+                            {"ok", std::to_string(chats.size()) + " chat(s)"}});
+}
+
+void MessengerServer::handleSearchUsers(const std::shared_ptr<ClientSession>& session,
+                                        const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
+        const std::string query = message.fields.empty() ? "" : message.fields[0];
+        sendToSession(session, {common::CommandType::UserSearchResult, {"error", "invalid search query", query}});
+        return;
+    }
+
+    std::vector<UserSearchResult> users;
+    std::string storageError;
+    if (!messageStore_.searchUsers(message.fields[0],
+                                   session->username,
+                                   kMaxUserSearchResults,
+                                   users,
+                                   storageError)) {
+        logEvent("user_search_failed user=" + session->username +
+                 " query=\"" + escapeLogField(message.fields[0]) +
+                 "\" error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::UserSearchResult, {"error", "storage error", message.fields[0]}});
+        return;
+    }
+
+    for (const auto& user : users) {
+        sendToSession(session, {common::CommandType::UserSearchItem,
+                                {message.fields[0], user.id, user.username}});
+    }
+
+    sendToSession(session, {common::CommandType::UserSearchResult,
+                            {"ok", std::to_string(users.size()) + " user(s)", message.fields[0]}});
+}
+
+void MessengerServer::handleCreateChat(const std::shared_ptr<ClientSession>& session,
+                                       const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    long long peerId = 0;
+    if (message.fields.size() != 1 || !parsePositiveInt64(message.fields[0], peerId)) {
+        sendToSession(session, {common::CommandType::CreateChatResult, {"error", "invalid user id"}});
+        return;
+    }
+
+    std::string peer;
+    std::string storageError;
+    if (!messageStore_.createConversation(session->username, peerId, peer, storageError)) {
+        logEvent("chat_create_failed user=" + session->username +
+                 " peer_id=" + message.fields[0] +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::CreateChatResult, {"error", storageError}});
+        return;
+    }
+
+    sendToSession(session, {common::CommandType::CreateChatResult, {"ok", message.fields[0], peer}});
+    handleFetchChats(session, {common::CommandType::FetchChats, {}});
+    logEvent("chat_created user=" + session->username + " peer=" + peer);
 }
 
 void MessengerServer::removeSession(const std::shared_ptr<ClientSession>& session) {
@@ -592,6 +773,44 @@ bool MessengerServer::isValidUsername(const std::string& username) {
     }
 
     return true;
+}
+
+bool MessengerServer::isValidPassword(const std::string& password) {
+    return password.size() >= 4 && password.size() <= 128;
+}
+
+std::string MessengerServer::generatePasswordSalt() {
+    std::random_device randomDevice;
+    std::mt19937_64 generator(randomDevice());
+    std::uniform_int_distribution<unsigned long long> distribution;
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0')
+        << std::setw(16) << distribution(generator)
+        << std::setw(16) << distribution(generator);
+    return out.str();
+}
+
+std::string MessengerServer::passwordHash(const std::string& password, const std::string& salt) {
+    // This is a salted FNV-1a based hash suitable for avoiding plain-text
+    // passwords in this coursework project. For production use, replace it with
+    // Argon2, bcrypt, scrypt or PBKDF2 from a vetted crypto library.
+    unsigned long long hash = 1469598103934665603ULL;
+    const std::string data = salt + '\n' + password;
+
+    for (int round = 0; round < 10000; ++round) {
+        for (unsigned char ch : data) {
+            hash ^= ch;
+            hash *= 1099511628211ULL;
+        }
+
+        hash ^= static_cast<unsigned long long>(round);
+        hash *= 1099511628211ULL;
+    }
+
+    std::ostringstream out;
+    out << std::hex << std::setfill('0') << std::setw(16) << hash;
+    return out.str();
 }
 
 std::string MessengerServer::currentTimestamp() {

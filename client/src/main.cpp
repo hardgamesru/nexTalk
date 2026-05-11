@@ -44,7 +44,7 @@ namespace {
             << "Commands:\n"
             << "  /msg <user> <text>  send private message\n"
             << "  /history <user> [n] show recent messages with user\n"
-            << "  /login <user>       change login\n"
+            << "  /chats              fetch chat list\n"
             << "  /help               show commands\n"
             << "  /quit               exit\n";
     }
@@ -83,6 +83,11 @@ int main(int argc, char* argv[]) {
         std::cout << "\n[error] " << text << '\n';
         printPrompt();
     };
+    callbacks.onRegisterResult = [](const std::string& status, const std::string& text) {
+        std::lock_guard<std::mutex> lock(g_outputMutex);
+        std::cout << "\n[register] " << status << ": " << text << '\n';
+        printPrompt();
+    };
     callbacks.onLoginResult = [](const std::string& status, const std::string& text) {
         std::lock_guard<std::mutex> lock(g_outputMutex);
         std::cout << "\n[login] " << status << ": " << text << '\n';
@@ -103,6 +108,18 @@ int main(int argc, char* argv[]) {
     callbacks.onHistoryResult = [](const std::string& status, const std::string& text) {
         std::lock_guard<std::mutex> lock(g_outputMutex);
         std::cout << "\n[history] " << status << ": " << text << '\n';
+        printPrompt();
+    };
+    callbacks.onChatItem = [](const client::ChatSummary& chat) {
+        std::lock_guard<std::mutex> lock(g_outputMutex);
+        std::cout << "\n[chat] " << chat.peer << " | "
+                  << chat.lastAt << " | " << chat.lastSender
+                  << ": " << chat.lastText << '\n';
+        printPrompt();
+    };
+    callbacks.onChatListResult = [](const std::string& status, const std::string& text) {
+        std::lock_guard<std::mutex> lock(g_outputMutex);
+        std::cout << "\n[chats] " << status << ": " << text << '\n';
         printPrompt();
     };
     callbacks.onProtocolError = [](const std::string& text) {
@@ -128,10 +145,18 @@ int main(int argc, char* argv[]) {
     {
         std::lock_guard<std::mutex> lock(g_outputMutex);
         std::cout << "Connected to " << host << ':' << port << '\n';
-        std::cout << "Login: " << std::flush;
+        std::cout << "Use existing account? [y/n]: " << std::flush;
     }
 
+    std::string mode;
+    std::getline(std::cin, mode);
+
     std::string login;
+    std::string password;
+    {
+        std::lock_guard<std::mutex> lock(g_outputMutex);
+        std::cout << "Login: " << std::flush;
+    }
     while (running && std::getline(std::cin, login)) {
         if (!login.empty()) {
             break;
@@ -146,7 +171,20 @@ int main(int argc, char* argv[]) {
         return 0;
     }
 
-    connection.login(login);
+    {
+        std::lock_guard<std::mutex> lock(g_outputMutex);
+        std::cout << "Password: " << std::flush;
+    }
+
+    if (!std::getline(std::cin, password) || password.empty()) {
+        connection.stop();
+        return 0;
+    }
+
+    if (!mode.empty() && (mode[0] == 'n' || mode[0] == 'N')) {
+        connection.registerAccount(login, password);
+    }
+    connection.login(login, password);
     printHelp();
 
     {
@@ -176,8 +214,8 @@ int main(int argc, char* argv[]) {
             continue;
         }
 
-        if (startsWith(input, "/login ")) {
-            connection.login(input.substr(7));
+        if (input == "/chats") {
+            connection.fetchChats();
             std::lock_guard<std::mutex> lock(g_outputMutex);
             printPrompt();
             continue;

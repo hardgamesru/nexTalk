@@ -1,6 +1,8 @@
 cmake-build-*/
 */cmake-build-*/
 build/
+nextalk.db
+*.db
 .idea/
 venv/
 __pycache__/

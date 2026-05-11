@@ -75,6 +75,8 @@ namespace common {
         // Эти строковые значения являются частью сетевого протокола. Если их
         // изменить, старые клиенты и серверы перестанут понимать друг друга.
         switch (type) {
+        case CommandType::Register: return "register";
+        case CommandType::RegisterResult: return "register_result";
         case CommandType::Login: return "login";
         case CommandType::LoginResult: return "login_result";
         case CommandType::SendMessage: return "send_message";
@@ -82,6 +84,14 @@ namespace common {
         case CommandType::FetchHistory: return "fetch_history";
         case CommandType::HistoryMessage: return "history_message";
         case CommandType::HistoryResult: return "history_result";
+        case CommandType::FetchChats: return "fetch_chats";
+        case CommandType::ChatItem: return "chat_item";
+        case CommandType::ChatListResult: return "chat_list_result";
+        case CommandType::SearchUsers: return "search_users";
+        case CommandType::UserSearchItem: return "user_search_item";
+        case CommandType::UserSearchResult: return "user_search_result";
+        case CommandType::CreateChat: return "create_chat";
+        case CommandType::CreateChatResult: return "create_chat_result";
         case CommandType::Info: return "info";
         case CommandType::Error: return "error";
         case CommandType::Quit: return "quit";
@@ -92,6 +102,8 @@ namespace common {
     }
 
     CommandType commandTypeFromString(const std::string& value) {
+        if (value == "register") return CommandType::Register;
+        if (value == "register_result") return CommandType::RegisterResult;
         if (value == "login") return CommandType::Login;
         if (value == "login_result") return CommandType::LoginResult;
         if (value == "send_message") return CommandType::SendMessage;
@@ -99,6 +111,14 @@ namespace common {
         if (value == "fetch_history") return CommandType::FetchHistory;
         if (value == "history_message") return CommandType::HistoryMessage;
         if (value == "history_result") return CommandType::HistoryResult;
+        if (value == "fetch_chats") return CommandType::FetchChats;
+        if (value == "chat_item") return CommandType::ChatItem;
+        if (value == "chat_list_result") return CommandType::ChatListResult;
+        if (value == "search_users") return CommandType::SearchUsers;
+        if (value == "user_search_item") return CommandType::UserSearchItem;
+        if (value == "user_search_result") return CommandType::UserSearchResult;
+        if (value == "create_chat") return CommandType::CreateChat;
+        if (value == "create_chat_result") return CommandType::CreateChatResult;
         if (value == "info") return CommandType::Info;
         if (value == "error") return CommandType::Error;
         if (value == "quit") return CommandType::Quit;

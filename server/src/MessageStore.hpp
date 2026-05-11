@@ -16,6 +16,19 @@ struct StoredMessage {
     std::string text;
 };
 
+struct ChatSummary {
+    std::string peerId;
+    std::string peer;
+    std::string lastAt;
+    std::string lastSender;
+    std::string lastText;
+};
+
+struct UserSearchResult {
+    std::string id;
+    std::string username;
+};
+
 /**
  * Small SQLite wrapper for NexTalk server persistence.
  *
@@ -33,7 +46,18 @@ public:
     bool open(const std::string& path, std::string& error);
     void close();
 
-    bool ensureUser(const std::string& username, std::string& error);
+    bool registerUser(const std::string& username,
+                      const std::string& passwordSalt,
+                      const std::string& passwordHash,
+                      std::string& error);
+    bool authenticateUser(const std::string& username,
+                          const std::string& passwordHash,
+                          bool& ok,
+                          std::string& error);
+    bool loadPasswordSalt(const std::string& username,
+                          std::string& passwordSalt,
+                          std::string& error);
+    bool userExists(const std::string& username, bool& exists, std::string& error);
     bool saveMessage(const std::string& sender,
                      const std::string& recipient,
                      const std::string& text,
@@ -43,11 +67,27 @@ public:
                       int limit,
                       std::vector<StoredMessage>& messages,
                       std::string& error);
+    bool fetchChats(const std::string& user,
+                    std::vector<ChatSummary>& chats,
+                    std::string& error);
+    bool searchUsers(const std::string& query,
+                     const std::string& excludeUser,
+                     int limit,
+                     std::vector<UserSearchResult>& users,
+                     std::string& error);
+    bool createConversation(const std::string& user,
+                            long long peerId,
+                            std::string& peerUsername,
+                            std::string& error);
 
 private:
     bool executeLocked(const char* sql, std::string& error);
     bool ensureSchemaLocked(std::string& error);
-    bool ensureUserLocked(const std::string& username, std::string& error);
+    bool ensureColumnLocked(const std::string& table,
+                            const std::string& column,
+                            const std::string& definition,
+                            std::string& error);
+    bool userExistsLocked(const std::string& username, bool& exists, std::string& error);
     bool findConversationLocked(const std::string& user,
                                 const std::string& peer,
                                 long long& conversationId,

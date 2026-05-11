@@ -13,6 +13,8 @@ namespace common {
      * строковые литералы по всему коду.
      */
     enum class CommandType {
+        Register,
+        RegisterResult,
         Login,
         LoginResult,
         SendMessage,
@@ -20,6 +22,14 @@ namespace common {
         FetchHistory,
         HistoryMessage,
         HistoryResult,
+        FetchChats,
+        ChatItem,
+        ChatListResult,
+        SearchUsers,
+        UserSearchItem,
+        UserSearchResult,
+        CreateChat,
+        CreateChatResult,
         Info,
         Error,
         Quit,

@@ -84,6 +84,12 @@ private:
                      const common::ProtocolMessage& message);
 
     /**
+     * Создает новый аккаунт пользователя.
+     */
+    void handleRegister(const std::shared_ptr<ClientSession>& session,
+                        const common::ProtocolMessage& message);
+
+    /**
      * Обрабатывает команду send_message и доставляет личное сообщение адресату.
      */
     void handleSendMessage(const std::shared_ptr<ClientSession>& session,
@@ -95,6 +101,24 @@ private:
      */
     void handleFetchHistory(const std::shared_ptr<ClientSession>& session,
                             const common::ProtocolMessage& message);
+
+    /**
+     * Отправляет список диалогов пользователя с последними сообщениями.
+     */
+    void handleFetchChats(const std::shared_ptr<ClientSession>& session,
+                          const common::ProtocolMessage& message);
+
+    /**
+     * Ищет пользователей по части имени для создания нового диалога.
+     */
+    void handleSearchUsers(const std::shared_ptr<ClientSession>& session,
+                           const common::ProtocolMessage& message);
+
+    /**
+     * Создает пустой диалог с существующим пользователем.
+     */
+    void handleCreateChat(const std::shared_ptr<ClientSession>& session,
+                          const common::ProtocolMessage& message);
 
     /**
      * Удаляет сессию из таблицы онлайн-пользователей и закрывает ее сокет.
@@ -111,6 +135,9 @@ private:
      */
     void logEvent(const std::string& event);
     static bool isValidUsername(const std::string& username);
+    static bool isValidPassword(const std::string& password);
+    static std::string generatePasswordSalt();
+    static std::string passwordHash(const std::string& password, const std::string& salt);
     static std::string currentTimestamp();
 
     int port_;
