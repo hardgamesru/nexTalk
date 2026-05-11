@@ -89,7 +89,7 @@ MessengerServer::~MessengerServer() {
 
 bool MessengerServer::start() {
     // Лог открывается в режиме append: события сохраняются между запусками
-    // сервера, что требуется в задании преподавателя.
+    // сервера, что требуется в задании
     logFile_.open(logPath_, std::ios::app);
     if (!logFile_) {
         std::cerr << "Cannot open log file: " << logPath_ << '\n';
