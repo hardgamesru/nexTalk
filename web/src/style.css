@@ -134,7 +134,9 @@ body {
   font-size: 14px;
 }
 
-input {
+input,
+select,
+textarea {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: 8px;
@@ -145,7 +147,9 @@ input {
   padding: 8px 10px;
 }
 
-input:focus {
+input:focus,
+select:focus,
+textarea:focus {
   outline: 2px solid #c7ccd2;
   border-color: #aeb5bd;
 }
@@ -775,6 +779,49 @@ button:disabled {
 .search-row small {
   margin-left: 8px;
   color: #5a636d;
+}
+
+.selected-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-top: 10px;
+}
+
+.member-chip {
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: #eef1f4;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.member-chip.self {
+  background: #dde5ed;
+}
+
+.group-settings-modal {
+  max-width: 520px;
+}
+
+.group-member-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 8px 4px;
+}
+
+.group-member-row small {
+  display: block;
+  color: var(--muted);
+  margin-top: 2px;
+}
+
+.group-member-actions {
+  display: flex;
+  gap: 8px;
+  flex-wrap: wrap;
 }
 
 .modal-actions {

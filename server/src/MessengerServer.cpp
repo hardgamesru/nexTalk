@@ -9,6 +9,7 @@
 #include <iostream>
 #include <netinet/in.h>
 #include <limits>
+#include <set>
 #include <random>
 #include <sstream>
 #include <sys/select.h>
@@ -138,6 +139,29 @@ namespace {
 
         output = result;
         return true;
+    }
+
+    std::vector<std::string> splitCsv(const std::string& value) {
+        std::vector<std::string> items;
+        std::stringstream input(value);
+        std::string token;
+        while (std::getline(input, token, ',')) {
+            if (!token.empty()) {
+                items.push_back(token);
+            }
+        }
+        return items;
+    }
+
+    std::string makeGroupChatId(long long groupId) {
+        return "group:" + std::to_string(groupId);
+    }
+
+    bool parseGroupChatIdValue(const std::string& chatId, long long& groupId) {
+        if (chatId.rfind("group:", 0) != 0) {
+            return false;
+        }
+        return parsePositiveInt64(chatId.substr(6), groupId);
     }
 }
 
@@ -419,6 +443,27 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::CreateChat:
             handleCreateChat(session, message);
             break;
+        case common::CommandType::CreateGroup:
+            handleCreateGroup(session, message);
+            break;
+        case common::CommandType::GetGroupInfo:
+            handleGetGroupInfo(session, message);
+            break;
+        case common::CommandType::AddGroupMembers:
+            handleAddGroupMembers(session, message);
+            break;
+        case common::CommandType::RemoveGroupMember:
+            handleRemoveGroupMember(session, message);
+            break;
+        case common::CommandType::TransferGroupAdmin:
+            handleTransferGroupAdmin(session, message);
+            break;
+        case common::CommandType::LeaveGroup:
+            handleLeaveGroup(session, message);
+            break;
+        case common::CommandType::DeleteGroup:
+            handleDeleteGroup(session, message);
+            break;
         case common::CommandType::MarkRead:
             handleMarkRead(session, message);
             break;
@@ -533,13 +578,13 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
     }
 
     if ((message.fields.size() != 2 && message.fields.size() != 3) ||
-        !isValidUsername(message.fields[0]) ||
+        message.fields[0].empty() ||
         message.fields[1].empty()) {
-        sendToSession(session, {common::CommandType::Error, {"usage: /msg <user> <text> [reply_id]"}});
+        sendToSession(session, {common::CommandType::Error, {"usage: /msg <chat_id> <text> [reply_id]"}});
         return;
     }
 
-    const std::string recipientName = message.fields[0];
+    const std::string targetChatId = message.fields[0];
     const std::string text = message.fields[1];
     long long replyToMessageId = 0;
     if (message.fields.size() == 3 && !message.fields[2].empty() &&
@@ -548,6 +593,78 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         return;
     }
 
+    long long groupId = 0;
+    if (parseGroupChatIdValue(targetChatId, groupId)) {
+        std::string storageError;
+        StoredMessage storedMessage;
+        std::string groupName;
+        std::vector<std::string> memberUsernames;
+        if (!messageStore_.saveGroupMessage(session->username,
+                                            groupId,
+                                            text,
+                                            replyToMessageId,
+                                            0,
+                                            storedMessage,
+                                            groupName,
+                                            memberUsernames,
+                                            storageError)) {
+            sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError}});
+            return;
+        }
+
+        const std::vector<std::string> selfFields = {
+            "ok",
+            std::to_string(storedMessage.id),
+            targetChatId,
+            storedMessage.createdAt,
+            storedMessage.sender,
+            groupName,
+            storedMessage.text,
+            storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
+            storedMessage.replyToSender,
+            storedMessage.replyToText,
+            storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+            storedMessage.forwardFromSender,
+            storedMessage.forwardFromText
+        };
+        sendToSession(session, {common::CommandType::SendMessageResult, selfFields});
+
+        const std::vector<std::string> incomingFields = {
+            std::to_string(storedMessage.id),
+            targetChatId,
+            storedMessage.createdAt,
+            storedMessage.sender,
+            groupName,
+            storedMessage.text,
+            storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
+            storedMessage.replyToSender,
+            storedMessage.replyToText,
+            storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+            storedMessage.forwardFromSender,
+            storedMessage.forwardFromText
+        };
+
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& username : memberUsernames) {
+            if (username == session->username) {
+                continue;
+            }
+            const auto it = onlineUsers_.find(username);
+            if (it != onlineUsers_.end()) {
+                sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
+                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+            }
+        }
+        handleFetchChats(session, {common::CommandType::FetchChats, {}});
+        return;
+    }
+
+    if (!isValidUsername(targetChatId)) {
+        sendToSession(session, {common::CommandType::Error, {"invalid user"}}); 
+        return;
+    }
+
+    const std::string recipientName = targetChatId;
     std::shared_ptr<ClientSession> recipient;
 
     {
@@ -584,6 +701,7 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
 
     const std::vector<std::string> messageFields = {
         std::to_string(storedMessage.id),
+        recipientName,
         storedMessage.createdAt,
         storedMessage.sender,
         storedMessage.recipient,
@@ -599,6 +717,7 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
     sendToSession(session, {common::CommandType::SendMessageResult,
                             {"ok",
                              std::to_string(storedMessage.id),
+                             recipientName,
                              storedMessage.createdAt,
                              storedMessage.sender,
                              storedMessage.recipient,
@@ -617,7 +736,10 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         return;
     }
 
-    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, messageFields})) {
+    std::vector<std::string> recipientFields = messageFields;
+    recipientFields[1] = session->username;
+
+    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, recipientFields})) {
         sendToSession(session, {common::CommandType::Info, {"saved; delivery will be available in history"}});
         logEvent("message_delivery_failed_saved from=" + session->username + " to=" + recipientName);
         return;
@@ -636,13 +758,13 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
         return;
     }
 
-    if ((message.fields.size() != 2 && message.fields.size() != 3) || !isValidUsername(message.fields[0])) {
-        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "usage: /forward <user> <message_id>"}});
+    if (message.fields.size() < 3 || message.fields.size() > 4 || message.fields[0].empty() || message.fields[1].empty()) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "usage: /forward <target_chat> <source_chat> <message_id> [text]"}});
         return;
     }
 
     long long sourceMessageId = 0;
-    if (!parsePositiveInt64(message.fields[1], sourceMessageId)) {
+    if (!parsePositiveInt64(message.fields[2], sourceMessageId)) {
         sendToSession(session, {common::CommandType::SendMessageResult, {"error", "invalid forward target"}});
         return;
     }
@@ -659,13 +781,83 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
         return;
     }
 
-    const std::string recipientName = message.fields[0];
+    const std::string targetChatId = message.fields[0];
+    const std::string sourceChatId = message.fields[1];
+    const std::string commentText = message.fields.size() == 4 ? message.fields[3] : "";
+
+    long long sourceGroupId = 0;
+    if (parseGroupChatIdValue(sourceChatId, sourceGroupId) && sourceMessage.recipient.empty()) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "invalid source chat"}});
+        return;
+    }
+
+    if (targetChatId == session->username) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "cannot forward messages to yourself"}});
+        return;
+    }
+
+    long long targetGroupId = 0;
+    if (parseGroupChatIdValue(targetChatId, targetGroupId)) {
+        std::string groupName;
+        std::vector<std::string> memberUsernames;
+        StoredMessage storedMessage;
+        if (!messageStore_.saveGroupMessage(session->username,
+                                            targetGroupId,
+                                            commentText,
+                                            0,
+                                            sourceMessage.id,
+                                            storedMessage,
+                                            groupName,
+                                            memberUsernames,
+                                            storageError)) {
+            sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError}});
+            return;
+        }
+
+        const std::vector<std::string> fields = {
+            std::to_string(storedMessage.id),
+            targetChatId,
+            storedMessage.createdAt,
+            storedMessage.sender,
+            groupName,
+            storedMessage.text,
+            "",
+            "",
+            "",
+            storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+            storedMessage.forwardFromSender,
+            storedMessage.forwardFromText
+        };
+        sendToSession(session, {common::CommandType::SendMessageResult, std::vector<std::string>{"ok",
+            std::to_string(storedMessage.id), targetChatId, storedMessage.createdAt, storedMessage.sender, groupName, storedMessage.text,
+            "", "", "", storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+            storedMessage.forwardFromSender, storedMessage.forwardFromText}});
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& username : memberUsernames) {
+            if (username == session->username) {
+                continue;
+            }
+            const auto it = onlineUsers_.find(username);
+            if (it != onlineUsers_.end()) {
+                sendToSession(it->second, {common::CommandType::IncomingMessage, fields});
+                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+            }
+        }
+        handleFetchChats(session, {common::CommandType::FetchChats, {}});
+        return;
+    }
+
+    if (!isValidUsername(targetChatId)) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "invalid target chat"}});
+        return;
+    }
+
+    const std::string recipientName = targetChatId;
     if (recipientName == session->username) {
         sendToSession(session, {common::CommandType::SendMessageResult, {"error", "cannot forward messages to yourself"}});
         return;
     }
 
-    const std::string commentText = message.fields.size() == 3 ? message.fields[2] : "";
     std::shared_ptr<ClientSession> recipient;
     {
         std::lock_guard<std::mutex> lock(clientsMutex_);
@@ -675,10 +867,6 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
         }
     }
 
-    logEvent("message_forwarded from=" + session->username +
-             " to=" + recipientName +
-             " source_id=" + std::to_string(sourceMessageId));
-
     StoredMessage storedMessage;
     if (!messageStore_.saveMessage(session->username,
                                    recipientName,
@@ -687,55 +875,35 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
                                    sourceMessage.id,
                                    storedMessage,
                                    storageError)) {
-        logEvent("forward_store_failed from=" + session->username +
-                 " to=" + recipientName +
-                 " error=\"" + escapeLogField(storageError) + "\"");
         sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError}});
         return;
     }
 
-    const std::vector<std::string> messageFields = {
+    const std::vector<std::string> senderFields = {
+        "ok",
         std::to_string(storedMessage.id),
+        recipientName,
         storedMessage.createdAt,
         storedMessage.sender,
         storedMessage.recipient,
         storedMessage.text,
-        storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
-        storedMessage.replyToSender,
-        storedMessage.replyToText,
+        "",
+        "",
+        "",
         storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
         storedMessage.forwardFromSender,
         storedMessage.forwardFromText
     };
+    sendToSession(session, {common::CommandType::SendMessageResult, senderFields});
 
-    sendToSession(session, {common::CommandType::SendMessageResult,
-                            {"ok",
-                             std::to_string(storedMessage.id),
-                             storedMessage.createdAt,
-                             storedMessage.sender,
-                             storedMessage.recipient,
-                             storedMessage.text,
-                             "",
-                             "",
-                             "",
-                             storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-                             storedMessage.forwardFromSender,
-                             storedMessage.forwardFromText}});
-
-    if (!recipient) {
-        sendToSession(session, {common::CommandType::Info, {"forwarded message saved for offline user " + recipientName}});
-        handleFetchChats(session, {common::CommandType::FetchChats, {}});
-        return;
+    std::vector<std::string> incomingFields = senderFields;
+    incomingFields.erase(incomingFields.begin());
+    incomingFields[1] = session->username;
+    if (recipient) {
+        sendToSession(recipient, {common::CommandType::IncomingMessage, incomingFields});
+        handleFetchChats(recipient, {common::CommandType::FetchChats, {}});
     }
-
-    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, messageFields})) {
-        sendToSession(session, {common::CommandType::Info, {"forward saved; delivery will be available in history"}});
-        return;
-    }
-
-    sendToSession(session, {common::CommandType::Info, {"forwarded to " + recipientName}});
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
-    handleFetchChats(recipient, {common::CommandType::FetchChats, {}});
 }
 
 void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& session,
@@ -745,8 +913,8 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
         return;
     }
 
-    if (message.fields.empty() || message.fields.size() > 2 || !isValidUsername(message.fields[0])) {
-        sendToSession(session, {common::CommandType::Error, {"usage: /history <user> [limit]"}});
+    if (message.fields.empty() || message.fields.size() > 2 || message.fields[0].empty()) {
+        sendToSession(session, {common::CommandType::Error, {"usage: /history <chat_id> [limit]"}});
         return;
     }
 
@@ -773,8 +941,12 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
     }
 
     for (const auto& item : history) {
+        long long historyGroupId = 0;
+        const std::string chatId = parseGroupChatIdValue(message.fields[0], historyGroupId) ? message.fields[0]
+                                   : (item.sender == session->username ? item.recipient : item.sender);
         sendToSession(session, {common::CommandType::HistoryMessage,
                                 {std::to_string(item.id),
+                                 chatId,
                                  item.createdAt,
                                  item.sender,
                                  item.recipient,
@@ -817,10 +989,12 @@ void MessengerServer::handleFetchChats(const std::shared_ptr<ClientSession>& ses
         sendToSession(session, {common::CommandType::ChatItem,
                                 {chat.peerId,
                                  chat.peer,
+                                 chat.isGroup ? "group" : "dm",
                                  chat.lastAt,
                                  chat.lastSender,
                                  chat.lastText,
-                                 std::to_string(chat.unreadCount)}});
+                                 std::to_string(chat.unreadCount),
+                                 chat.canManage ? "1" : "0"}});
     }
 
     sendToSession(session, {common::CommandType::ChatListResult,
@@ -834,9 +1008,16 @@ void MessengerServer::handleSearchUsers(const std::shared_ptr<ClientSession>& se
         return;
     }
 
-    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
+    if (message.fields.empty() || message.fields.size() > 3 || !isValidUsername(message.fields[0])) {
         const std::string query = message.fields.empty() ? "" : message.fields[0];
         sendToSession(session, {common::CommandType::UserSearchResult, {"error", "invalid search query", query}});
+        return;
+    }
+
+    const std::string scope = message.fields.size() >= 2 ? message.fields[1] : "dm";
+    const std::string scopeTarget = message.fields.size() >= 3 ? message.fields[2] : "";
+    if (scope != "dm" && scope != "group_create" && scope != "group_add") {
+        sendToSession(session, {common::CommandType::UserSearchResult, {"error", "invalid search scope", message.fields[0]}});
         return;
     }
 
@@ -844,6 +1025,8 @@ void MessengerServer::handleSearchUsers(const std::shared_ptr<ClientSession>& se
     std::string storageError;
     if (!messageStore_.searchUsers(message.fields[0],
                                    session->username,
+                                   scope,
+                                   scopeTarget,
                                    kMaxUserSearchResults,
                                    users,
                                    storageError)) {
@@ -886,9 +1069,311 @@ void MessengerServer::handleCreateChat(const std::shared_ptr<ClientSession>& ses
         return;
     }
 
-    sendToSession(session, {common::CommandType::CreateChatResult, {"ok", message.fields[0], peer}});
+    sendToSession(session, {common::CommandType::CreateChatResult, {"ok", peer, peer}});
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
     logEvent("chat_created user=" + session->username + " peer=" + peer);
+}
+
+void MessengerServer::handleCreateGroup(const std::shared_ptr<ClientSession>& session,
+                                        const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    if (message.fields.size() != 3 || message.fields[0].empty() || !isValidUsername(message.fields[1])) {
+        sendToSession(session, {common::CommandType::CreateGroupResult, {"error", "invalid group payload"}});
+        return;
+    }
+
+    std::set<std::string> uniqueMembers;
+    uniqueMembers.insert(session->username);
+    for (const auto& username : splitCsv(message.fields[2])) {
+        if (!isValidUsername(username)) {
+            sendToSession(session, {common::CommandType::CreateGroupResult, {"error", "invalid member username"}});
+            return;
+        }
+        uniqueMembers.insert(username);
+    }
+
+    if (uniqueMembers.find(message.fields[1]) == uniqueMembers.end()) {
+        sendToSession(session, {common::CommandType::CreateGroupResult, {"error", "admin must be one of selected members"}});
+        return;
+    }
+
+    const std::vector<std::string> members(uniqueMembers.begin(), uniqueMembers.end());
+    long long groupId = 0;
+    std::string storageError;
+    if (!messageStore_.createGroup(session->username, message.fields[0], message.fields[1], members, groupId, storageError)) {
+        sendToSession(session, {common::CommandType::CreateGroupResult, {"error", storageError}});
+        return;
+    }
+
+    StoredMessage createdMessage;
+    std::string groupName;
+    std::vector<std::string> memberUsernames;
+    messageStore_.saveGroupSystemMessage(groupId,
+                                         session->username + " created the group",
+                                         createdMessage,
+                                         groupName,
+                                         memberUsernames,
+                                         storageError);
+
+    sendToSession(session, {common::CommandType::CreateGroupResult, {"ok", makeGroupChatId(groupId), message.fields[0]}});
+    std::lock_guard<std::mutex> lock(clientsMutex_);
+    for (const auto& username : members) {
+        const auto it = onlineUsers_.find(username);
+        if (it != onlineUsers_.end()) {
+            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+        }
+    }
+}
+
+void MessengerServer::handleGetGroupInfo(const std::shared_ptr<ClientSession>& session,
+                                         const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    long long groupId = 0;
+    if (message.fields.size() != 1 || !parseGroupChatIdValue(message.fields[0], groupId)) {
+        sendToSession(session, {common::CommandType::GroupInfoResult, {"error", "invalid group"}});
+        return;
+    }
+
+    GroupInfo info;
+    std::vector<GroupMemberInfo> members;
+    std::string storageError;
+    if (!messageStore_.fetchGroupInfo(session->username, groupId, info, members, storageError)) {
+        sendToSession(session, {common::CommandType::GroupInfoResult, {"error", storageError}});
+        return;
+    }
+
+    for (const auto& member : members) {
+        sendToSession(session, {common::CommandType::GroupMemberItem,
+                                {info.chatId, member.username, member.isAdmin ? "1" : "0"}});
+    }
+    sendToSession(session, {common::CommandType::GroupInfoResult,
+                            {"ok", info.chatId, info.name, info.adminUsername, info.canManage ? "1" : "0"}});
+}
+
+void MessengerServer::handleAddGroupMembers(const std::shared_ptr<ClientSession>& session,
+                                            const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    long long groupId = 0;
+    if (message.fields.size() != 2 || !parseGroupChatIdValue(message.fields[0], groupId)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", "invalid group"}});
+        return;
+    }
+
+    std::set<std::string> uniqueUsers;
+    for (const auto& username : splitCsv(message.fields[1])) {
+        if (!isValidUsername(username)) {
+            sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", "invalid member username"}});
+            return;
+        }
+        uniqueUsers.insert(username);
+    }
+
+    std::vector<std::string> addedUsers;
+    std::string storageError;
+    std::vector<std::string> usernames(uniqueUsers.begin(), uniqueUsers.end());
+    if (!messageStore_.addGroupMembers(session->username, groupId, usernames, addedUsers, storageError)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", storageError, message.fields[0]}});
+        return;
+    }
+
+    for (const auto& username : addedUsers) {
+        StoredMessage systemMessage;
+        std::string groupName;
+        std::vector<std::string> memberUsernames;
+        messageStore_.saveGroupSystemMessage(groupId,
+                                             session->username + " added " + username,
+                                             systemMessage,
+                                             groupName,
+                                             memberUsernames,
+                                             storageError);
+        const std::vector<std::string> incomingFields = {
+            std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
+            groupName, systemMessage.text, "", "", "", "", "", ""
+        };
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& member : memberUsernames) {
+            const auto it = onlineUsers_.find(member);
+            if (it != onlineUsers_.end()) {
+                if (member != session->username) {
+                    sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
+                }
+                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+            }
+        }
+    }
+
+    sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "members added", message.fields[0]}});
+}
+
+void MessengerServer::handleRemoveGroupMember(const std::shared_ptr<ClientSession>& session,
+                                              const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    long long groupId = 0;
+    if (message.fields.size() != 2 || !parseGroupChatIdValue(message.fields[0], groupId) || !isValidUsername(message.fields[1])) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", "invalid request"}});
+        return;
+    }
+    std::string storageError;
+    if (!messageStore_.removeGroupMember(session->username, groupId, message.fields[1], storageError)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", storageError, message.fields[0]}});
+        return;
+    }
+
+    StoredMessage systemMessage;
+    std::string groupName;
+    std::vector<std::string> memberUsernames;
+    messageStore_.saveGroupSystemMessage(groupId,
+                                         session->username + " removed " + message.fields[1],
+                                         systemMessage,
+                                         groupName,
+                                         memberUsernames,
+                                         storageError);
+    const std::vector<std::string> incomingFields = {
+        std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
+        groupName, systemMessage.text, "", "", "", "", "", ""
+    };
+    std::lock_guard<std::mutex> lock(clientsMutex_);
+    for (const auto& member : memberUsernames) {
+        const auto it = onlineUsers_.find(member);
+        if (it != onlineUsers_.end()) {
+            sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
+            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+        }
+    }
+    const auto removedIt = onlineUsers_.find(message.fields[1]);
+    if (removedIt != onlineUsers_.end()) {
+        sendToSession(removedIt->second, {common::CommandType::ChatRemoved, {message.fields[0], "removed from group"}});
+        handleFetchChats(removedIt->second, {common::CommandType::FetchChats, {}});
+    }
+    sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "member removed", message.fields[0]}});
+}
+
+void MessengerServer::handleTransferGroupAdmin(const std::shared_ptr<ClientSession>& session,
+                                               const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    long long groupId = 0;
+    if (message.fields.size() != 2 || !parseGroupChatIdValue(message.fields[0], groupId) || !isValidUsername(message.fields[1])) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", "invalid request"}});
+        return;
+    }
+    std::string storageError;
+    if (!messageStore_.transferGroupAdmin(session->username, groupId, message.fields[1], storageError)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", storageError, message.fields[0]}});
+        return;
+    }
+    StoredMessage systemMessage;
+    std::string groupName;
+    std::vector<std::string> memberUsernames;
+    messageStore_.saveGroupSystemMessage(groupId,
+                                         session->username + " transferred admin to " + message.fields[1],
+                                         systemMessage,
+                                         groupName,
+                                         memberUsernames,
+                                         storageError);
+    const std::vector<std::string> incomingFields = {
+        std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
+        groupName, systemMessage.text, "", "", "", "", "", ""
+    };
+    std::lock_guard<std::mutex> lock(clientsMutex_);
+    for (const auto& member : memberUsernames) {
+        const auto it = onlineUsers_.find(member);
+        if (it != onlineUsers_.end()) {
+            sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
+            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+        }
+    }
+    sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "admin transferred", message.fields[0]}});
+}
+
+void MessengerServer::handleLeaveGroup(const std::shared_ptr<ClientSession>& session,
+                                       const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    long long groupId = 0;
+    if (message.fields.size() != 1 || !parseGroupChatIdValue(message.fields[0], groupId)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", "invalid group"}});
+        return;
+    }
+    std::string storageError;
+    if (!messageStore_.leaveGroup(session->username, groupId, storageError)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", storageError, message.fields[0]}});
+        return;
+    }
+    StoredMessage systemMessage;
+    std::string groupName;
+    std::vector<std::string> memberUsernames;
+    messageStore_.saveGroupSystemMessage(groupId,
+                                         session->username + " left the group",
+                                         systemMessage,
+                                         groupName,
+                                         memberUsernames,
+                                         storageError);
+    const std::vector<std::string> incomingFields = {
+        std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
+        groupName, systemMessage.text, "", "", "", "", "", ""
+    };
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& member : memberUsernames) {
+            const auto it = onlineUsers_.find(member);
+            if (it != onlineUsers_.end()) {
+                sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
+                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+            }
+        }
+        const auto selfIt = onlineUsers_.find(session->username);
+        if (selfIt != onlineUsers_.end()) {
+            sendToSession(selfIt->second, {common::CommandType::ChatRemoved, {message.fields[0], "left group"}});
+            handleFetchChats(selfIt->second, {common::CommandType::FetchChats, {}});
+        }
+    }
+    sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "left group", message.fields[0]}});
+}
+
+void MessengerServer::handleDeleteGroup(const std::shared_ptr<ClientSession>& session,
+                                        const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    long long groupId = 0;
+    if (message.fields.size() != 1 || !parseGroupChatIdValue(message.fields[0], groupId)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", "invalid group"}});
+        return;
+    }
+
+    std::vector<std::string> removedUsers;
+    std::string storageError;
+    if (!messageStore_.deleteGroup(session->username, groupId, removedUsers, storageError)) {
+        sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", storageError, message.fields[0]}});
+        return;
+    }
+    std::lock_guard<std::mutex> lock(clientsMutex_);
+    for (const auto& username : removedUsers) {
+        const auto it = onlineUsers_.find(username);
+        if (it != onlineUsers_.end()) {
+            sendToSession(it->second, {common::CommandType::ChatRemoved, {message.fields[0], "group deleted"}});
+            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+        }
+    }
+    sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "group deleted", message.fields[0]}});
 }
 
 void MessengerServer::handleMarkRead(const std::shared_ptr<ClientSession>& session,
@@ -898,7 +1383,7 @@ void MessengerServer::handleMarkRead(const std::shared_ptr<ClientSession>& sessi
         return;
     }
 
-    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
+    if (message.fields.size() != 1 || message.fields[0].empty()) {
         sendToSession(session, {common::CommandType::MarkReadResult, {"error", "invalid chat"}});
         return;
     }
@@ -922,12 +1407,17 @@ void MessengerServer::handleDeleteChat(const std::shared_ptr<ClientSession>& ses
         return;
     }
 
-    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
+    if (message.fields.size() != 1 || message.fields[0].empty()) {
         sendToSession(session, {common::CommandType::DeleteChatResult, {"error", "invalid chat"}});
         return;
     }
 
     const std::string peer = message.fields[0];
+    long long groupId = 0;
+    if (parseGroupChatIdValue(peer, groupId)) {
+        sendToSession(session, {common::CommandType::DeleteChatResult, {"error", "group actions are available in group settings", peer}});
+        return;
+    }
     std::string storageError;
     if (!messageStore_.deleteConversation(session->username, peer, storageError)) {
         logEvent("chat_delete_failed user=" + session->username +

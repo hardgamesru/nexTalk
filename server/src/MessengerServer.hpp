@@ -125,6 +125,20 @@ private:
      */
     void handleCreateChat(const std::shared_ptr<ClientSession>& session,
                           const common::ProtocolMessage& message);
+    void handleCreateGroup(const std::shared_ptr<ClientSession>& session,
+                           const common::ProtocolMessage& message);
+    void handleGetGroupInfo(const std::shared_ptr<ClientSession>& session,
+                            const common::ProtocolMessage& message);
+    void handleAddGroupMembers(const std::shared_ptr<ClientSession>& session,
+                               const common::ProtocolMessage& message);
+    void handleRemoveGroupMember(const std::shared_ptr<ClientSession>& session,
+                                 const common::ProtocolMessage& message);
+    void handleTransferGroupAdmin(const std::shared_ptr<ClientSession>& session,
+                                  const common::ProtocolMessage& message);
+    void handleLeaveGroup(const std::shared_ptr<ClientSession>& session,
+                          const common::ProtocolMessage& message);
+    void handleDeleteGroup(const std::shared_ptr<ClientSession>& session,
+                           const common::ProtocolMessage& message);
 
     /**
      * Помечает диалог как прочитанный для текущего пользователя.

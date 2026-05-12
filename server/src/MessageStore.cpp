@@ -1,5 +1,6 @@
 #include "MessageStore.hpp"
 
+#include <algorithm>
 #include <sqlite3.h>
 #include <utility>
 
@@ -60,6 +61,37 @@ namespace {
         }
 
         return escaped;
+    }
+
+    std::string groupChatId(long long groupId) {
+        return "group:" + std::to_string(groupId);
+    }
+
+    bool parseGroupChatId(const std::string& chatId, long long& groupId) {
+        constexpr const char* prefix = "group:";
+        if (chatId.rfind(prefix, 0) != 0) {
+            return false;
+        }
+
+        const std::string rawId = chatId.substr(6);
+        if (rawId.empty()) {
+            return false;
+        }
+
+        long long result = 0;
+        for (char ch : rawId) {
+            if (ch < '0' || ch > '9') {
+                return false;
+            }
+            result = result * 10 + (ch - '0');
+        }
+
+        if (result <= 0) {
+            return false;
+        }
+
+        groupId = result;
+        return true;
     }
 }
 
@@ -326,20 +358,37 @@ bool MessageStore::saveMessage(const std::string& sender,
         sqlite3_bind_text(forwardStatement.get(), 3, sender.c_str(), -1, SQLITE_TRANSIENT);
 
         const int forwardResult = sqlite3_step(forwardStatement.get());
-        if (forwardResult == SQLITE_DONE) {
-            error = "forward target not found";
-            return false;
-        }
-
-        if (forwardResult != SQLITE_ROW) {
+        if (forwardResult != SQLITE_ROW && forwardResult != SQLITE_DONE) {
             error = lastError(db_);
             return false;
         }
-
-        const auto* rawForwardSender = sqlite3_column_text(forwardStatement.get(), 0);
-        const auto* rawForwardText = sqlite3_column_text(forwardStatement.get(), 1);
-        forwardFromSender = rawForwardSender ? reinterpret_cast<const char*>(rawForwardSender) : "";
-        forwardFromText = rawForwardText ? reinterpret_cast<const char*>(rawForwardText) : "";
+        if (forwardResult == SQLITE_ROW) {
+            const auto* rawForwardSender = sqlite3_column_text(forwardStatement.get(), 0);
+            const auto* rawForwardText = sqlite3_column_text(forwardStatement.get(), 1);
+            forwardFromSender = rawForwardSender ? reinterpret_cast<const char*>(rawForwardSender) : "";
+            forwardFromText = rawForwardText ? reinterpret_cast<const char*>(rawForwardText) : "";
+        } else {
+            Statement groupForward(db_,
+                                   "SELECT m.sender, m.body "
+                                   "FROM group_messages m "
+                                   "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
+                                   "WHERE m.id = ?;",
+                                   error);
+            if (!groupForward) {
+                return false;
+            }
+            sqlite3_bind_text(groupForward.get(), 1, sender.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(groupForward.get(), 2, forwardFromMessageId);
+            const int groupForwardResult = sqlite3_step(groupForward.get());
+            if (groupForwardResult != SQLITE_ROW) {
+                error = groupForwardResult == SQLITE_DONE ? "forward target not found" : lastError(db_);
+                return false;
+            }
+            const auto* rawForwardSender = sqlite3_column_text(groupForward.get(), 0);
+            const auto* rawForwardText = sqlite3_column_text(groupForward.get(), 1);
+            forwardFromSender = rawForwardSender ? reinterpret_cast<const char*>(rawForwardSender) : "";
+            forwardFromText = rawForwardText ? reinterpret_cast<const char*>(rawForwardText) : "";
+        }
     }
 
     Statement statement(db_,
@@ -432,31 +481,77 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
     sqlite3_bind_text(statement.get(), 3, username.c_str(), -1, SQLITE_TRANSIENT);
 
     const int result = sqlite3_step(statement.get());
-    if (result == SQLITE_DONE) {
+    if (result == SQLITE_ROW) {
+        auto columnText = [&](int column) -> std::string {
+            const auto* value = sqlite3_column_text(statement.get(), column);
+            return value ? reinterpret_cast<const char*>(value) : "";
+        };
+
+        message.id = sqlite3_column_int64(statement.get(), 0);
+        message.createdAt = columnText(1);
+        message.sender = columnText(2);
+        message.recipient = columnText(3);
+        message.text = columnText(4);
+        message.replyToMessageId = sqlite3_column_int64(statement.get(), 5);
+        message.replyToSender = columnText(6);
+        message.replyToText = columnText(7);
+        message.forwardFromMessageId = sqlite3_column_int64(statement.get(), 8);
+        message.forwardFromSender = columnText(9);
+        message.forwardFromText = columnText(10);
         return true;
     }
 
-    if (result != SQLITE_ROW) {
+    if (result != SQLITE_DONE) {
         error = lastError(db_);
         return false;
     }
 
-    auto columnText = [&](int column) -> std::string {
-        const auto* value = sqlite3_column_text(statement.get(), column);
+    Statement groupStatement(db_,
+                             "SELECT m.id, m.created_at, m.sender, g.name, m.body, "
+                             "       COALESCE(m.reply_to_message_id, 0), "
+                             "       COALESCE(reply.sender, ''), "
+                             "       COALESCE(reply.body, ''), "
+                             "       COALESCE(m.forward_from_message_id, 0), "
+                             "       COALESCE(fwd.sender, ''), "
+                             "       COALESCE(fwd.body, '') "
+                             "FROM group_messages m "
+                             "JOIN groups_chat g ON g.id = m.group_id "
+                             "JOIN group_members gm ON gm.group_id = g.id AND gm.username = ? "
+                             "LEFT JOIN group_messages reply ON reply.id = m.reply_to_message_id "
+                             "LEFT JOIN group_messages fwd ON fwd.id = m.forward_from_message_id "
+                             "WHERE m.id = ?;",
+                             error);
+    if (!groupStatement) {
+        return false;
+    }
+    sqlite3_bind_text(groupStatement.get(), 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(groupStatement.get(), 2, messageId);
+    const int groupResult = sqlite3_step(groupStatement.get());
+    if (groupResult == SQLITE_DONE) {
+        message = StoredMessage{};
+        return true;
+    }
+    if (groupResult != SQLITE_ROW) {
+        error = lastError(db_);
+        return false;
+    }
+
+    auto groupColumnText = [&](int column) -> std::string {
+        const auto* value = sqlite3_column_text(groupStatement.get(), column);
         return value ? reinterpret_cast<const char*>(value) : "";
     };
 
-    message.id = sqlite3_column_int64(statement.get(), 0);
-    message.createdAt = columnText(1);
-    message.sender = columnText(2);
-    message.recipient = columnText(3);
-    message.text = columnText(4);
-    message.replyToMessageId = sqlite3_column_int64(statement.get(), 5);
-    message.replyToSender = columnText(6);
-    message.replyToText = columnText(7);
-    message.forwardFromMessageId = sqlite3_column_int64(statement.get(), 8);
-    message.forwardFromSender = columnText(9);
-    message.forwardFromText = columnText(10);
+    message.id = sqlite3_column_int64(groupStatement.get(), 0);
+    message.createdAt = groupColumnText(1);
+    message.sender = groupColumnText(2);
+    message.recipient = groupColumnText(3);
+    message.text = groupColumnText(4);
+    message.replyToMessageId = sqlite3_column_int64(groupStatement.get(), 5);
+    message.replyToSender = groupColumnText(6);
+    message.replyToText = groupColumnText(7);
+    message.forwardFromMessageId = sqlite3_column_int64(groupStatement.get(), 8);
+    message.forwardFromSender = groupColumnText(9);
+    message.forwardFromText = groupColumnText(10);
     return true;
 }
 
@@ -466,48 +561,47 @@ bool MessageStore::fetchChats(const std::string& user,
     chats.clear();
     std::lock_guard<std::mutex> lock(mutex_);
 
-    Statement statement(db_,
-                        "SELECT "
-                        "  peer.id,"
-                        "  peer.username,"
-                        "  m.created_at,"
-                        "  m.sender,"
-                        "  m.body,"
-                        "  COALESCE(("
-                        "    SELECT COUNT(1) "
-                        "    FROM messages unread "
-                        "    WHERE unread.conversation_id = c.id "
-                        "      AND unread.sender != ? "
-                        "      AND unread.id > COALESCE(cr.last_read_message_id, 0)"
-                        "  ), 0) "
-                        "FROM conversations c "
-                        "JOIN users peer ON peer.username = "
-                        "  CASE WHEN c.user_low = ? THEN c.user_high ELSE c.user_low END "
-                        "LEFT JOIN messages m ON m.id = ("
-                        "  SELECT id FROM messages "
-                        "  WHERE conversation_id = c.id "
-                        "  ORDER BY id DESC "
-                        "  LIMIT 1"
-                        ") "
-                        "LEFT JOIN conversation_reads cr "
-                        "  ON cr.conversation_id = c.id AND cr.username = ? "
-                        "WHERE c.user_low = ? OR c.user_high = ? "
-                        "ORDER BY CASE WHEN m.id IS NULL THEN c.id ELSE m.id END DESC;",
-                        error);
-    if (!statement) {
+    Statement directStatement(db_,
+                              "SELECT "
+                              "  peer.id,"
+                              "  peer.username,"
+                              "  m.created_at,"
+                              "  m.sender,"
+                              "  m.body,"
+                              "  COALESCE(("
+                              "    SELECT COUNT(1) "
+                              "    FROM messages unread "
+                              "    WHERE unread.conversation_id = c.id "
+                              "      AND unread.sender != ? "
+                              "      AND unread.id > COALESCE(cr.last_read_message_id, 0)"
+                              "  ), 0) "
+                              "FROM conversations c "
+                              "JOIN users peer ON peer.username = "
+                              "  CASE WHEN c.user_low = ? THEN c.user_high ELSE c.user_low END "
+                              "LEFT JOIN messages m ON m.id = ("
+                              "  SELECT id FROM messages "
+                              "  WHERE conversation_id = c.id "
+                              "  ORDER BY id DESC "
+                              "  LIMIT 1"
+                              ") "
+                              "LEFT JOIN conversation_reads cr "
+                              "  ON cr.conversation_id = c.id AND cr.username = ? "
+                              "WHERE c.user_low = ? OR c.user_high = ?;",
+                              error);
+    if (!directStatement) {
         return false;
     }
 
-    sqlite3_bind_text(statement.get(), 1, user.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 3, user.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 4, user.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 5, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directStatement.get(), 1, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directStatement.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directStatement.get(), 3, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directStatement.get(), 4, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directStatement.get(), 5, user.c_str(), -1, SQLITE_TRANSIENT);
 
     while (true) {
-        const int result = sqlite3_step(statement.get());
+        const int result = sqlite3_step(directStatement.get());
         if (result == SQLITE_DONE) {
-            return true;
+            break;
         }
 
         if (result != SQLITE_ROW) {
@@ -516,23 +610,101 @@ bool MessageStore::fetchChats(const std::string& user,
         }
 
         auto columnText = [&](int column) -> std::string {
-            const auto* value = sqlite3_column_text(statement.get(), column);
+            const auto* value = sqlite3_column_text(directStatement.get(), column);
             return value ? reinterpret_cast<const char*>(value) : "";
         };
 
         chats.push_back({
-            columnText(0),
+            columnText(1),
             columnText(1),
             columnText(2),
             columnText(3),
             columnText(4),
-            sqlite3_column_int(statement.get(), 5)
+            sqlite3_column_int(directStatement.get(), 5),
+            false,
+            false
         });
     }
+
+    Statement groupStatement(db_,
+                             "SELECT "
+                             "  g.id,"
+                             "  g.name,"
+                             "  g.admin_username,"
+                             "  m.created_at,"
+                             "  m.sender,"
+                             "  m.body,"
+                             "  COALESCE(("
+                             "    SELECT COUNT(1) "
+                             "    FROM group_messages unread "
+                             "    WHERE unread.group_id = g.id "
+                             "      AND unread.sender != ? "
+                             "      AND unread.id > COALESCE(gr.last_read_message_id, 0)"
+                             "  ), 0) "
+                             "FROM groups_chat g "
+                             "JOIN group_members gm ON gm.group_id = g.id AND gm.username = ? "
+                             "LEFT JOIN group_messages m ON m.id = ("
+                             "  SELECT id FROM group_messages "
+                             "  WHERE group_id = g.id "
+                             "  ORDER BY id DESC "
+                             "  LIMIT 1"
+                             ") "
+                             "LEFT JOIN group_reads gr ON gr.group_id = g.id AND gr.username = ?;",
+                             error);
+    if (!groupStatement) {
+        return false;
+    }
+
+    sqlite3_bind_text(groupStatement.get(), 1, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(groupStatement.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(groupStatement.get(), 3, user.c_str(), -1, SQLITE_TRANSIENT);
+
+    while (true) {
+        const int result = sqlite3_step(groupStatement.get());
+        if (result == SQLITE_DONE) {
+            break;
+        }
+
+        if (result != SQLITE_ROW) {
+            error = lastError(db_);
+            return false;
+        }
+
+        auto columnText = [&](int column) -> std::string {
+            const auto* value = sqlite3_column_text(groupStatement.get(), column);
+            return value ? reinterpret_cast<const char*>(value) : "";
+        };
+
+        chats.push_back({
+            groupChatId(sqlite3_column_int64(groupStatement.get(), 0)),
+            columnText(1),
+            columnText(3),
+            columnText(4),
+            columnText(5),
+            sqlite3_column_int(groupStatement.get(), 6),
+            true,
+            columnText(2) == user
+        });
+    }
+
+    std::sort(chats.begin(), chats.end(), [](const ChatSummary& left, const ChatSummary& right) {
+        const long long leftKey = left.lastAt.empty() ? 0 : 1;
+        const long long rightKey = right.lastAt.empty() ? 0 : 1;
+        if (leftKey != rightKey) {
+            return leftKey > rightKey;
+        }
+        if (left.lastAt != right.lastAt) {
+            return left.lastAt > right.lastAt;
+        }
+        return left.peer < right.peer;
+    });
+    return true;
 }
 
 bool MessageStore::searchUsers(const std::string& query,
                                const std::string& excludeUser,
+                               const std::string& scope,
+                               const std::string& scopeTarget,
                                int limit,
                                std::vector<UserSearchResult>& users,
                                std::string& error) {
@@ -543,38 +715,60 @@ bool MessageStore::searchUsers(const std::string& query,
     const std::string containsPattern = "%" + escapedQuery + "%";
     const std::string prefixPattern = escapedQuery + "%";
 
-    Statement statement(db_,
-                        "SELECT candidate.id, candidate.username "
-                        "FROM users candidate "
-                        "JOIN users current_user ON current_user.username = ? "
-                        "WHERE candidate.id != current_user.id "
-                        "  AND candidate.username LIKE ? ESCAPE '\\' "
-                        "  AND NOT EXISTS ("
-                        "    SELECT 1 "
-                        "    FROM conversations c "
-                        "    JOIN users low_user ON low_user.username = c.user_low "
-                        "    JOIN users high_user ON high_user.username = c.user_high "
-                        "    WHERE (low_user.id = current_user.id AND high_user.id = candidate.id) "
-                        "       OR (low_user.id = candidate.id AND high_user.id = current_user.id)"
-                        "  ) "
-                        "ORDER BY "
-                        "  CASE "
-                        "    WHEN candidate.username = ? THEN 0 "
-                        "    WHEN candidate.username LIKE ? ESCAPE '\\' THEN 1 "
-                        "    ELSE 2 "
-                        "  END,"
-                        "  candidate.username ASC "
-                        "LIMIT ?;",
-                        error);
+    std::string sql =
+        "SELECT candidate.id, candidate.username "
+        "FROM users candidate "
+        "JOIN users current_user ON current_user.username = ? "
+        "WHERE candidate.id != current_user.id "
+        "  AND candidate.username LIKE ? ESCAPE '\\' ";
+
+    if (scope == "dm") {
+        sql +=
+            "  AND NOT EXISTS ("
+            "    SELECT 1 "
+            "    FROM conversations c "
+            "    JOIN users low_user ON low_user.username = c.user_low "
+            "    JOIN users high_user ON high_user.username = c.user_high "
+            "    WHERE (low_user.id = current_user.id AND high_user.id = candidate.id) "
+            "       OR (low_user.id = candidate.id AND high_user.id = current_user.id)"
+            "  ) ";
+    } else if (scope == "group_add") {
+        sql +=
+            "  AND NOT EXISTS ("
+            "    SELECT 1 FROM group_members gm "
+            "    WHERE gm.group_id = ? AND gm.username = candidate.username"
+            "  ) ";
+    }
+
+    sql +=
+        "ORDER BY "
+        "  CASE "
+        "    WHEN candidate.username = ? THEN 0 "
+        "    WHEN candidate.username LIKE ? ESCAPE '\\' THEN 1 "
+        "    ELSE 2 "
+        "  END,"
+        "  candidate.username ASC "
+        "LIMIT ?;";
+
+    Statement statement(db_, sql.c_str(), error);
     if (!statement) {
         return false;
     }
 
-    sqlite3_bind_text(statement.get(), 1, excludeUser.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 2, containsPattern.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 3, query.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 4, prefixPattern.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int(statement.get(), 5, limit);
+    int bindIndex = 1;
+    sqlite3_bind_text(statement.get(), bindIndex++, excludeUser.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), bindIndex++, containsPattern.c_str(), -1, SQLITE_TRANSIENT);
+    if (scope == "group_add") {
+        long long groupId = 0;
+        if (!parseGroupChatId(scopeTarget, groupId)) {
+            error = "invalid group";
+            return false;
+        }
+        sqlite3_bind_int64(statement.get(), bindIndex++, groupId);
+    }
+    sqlite3_bind_text(statement.get(), bindIndex++, query.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), bindIndex++, prefixPattern.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int(statement.get(), bindIndex++, limit);
 
     while (true) {
         const int result = sqlite3_step(statement.get());
@@ -656,6 +850,104 @@ bool MessageStore::fetchHistory(const std::string& user,
 
     std::lock_guard<std::mutex> lock(mutex_);
 
+    long long groupId = 0;
+    if (parseGroupChatId(peer, groupId)) {
+        bool isMember = false;
+        if (!isGroupMemberLocked(groupId, user, isMember, error)) {
+            return false;
+        }
+
+        if (!isMember) {
+            error = "group not found";
+            return false;
+        }
+
+        std::string groupName;
+        std::string adminUsername;
+        std::vector<std::string> memberUsernames;
+        if (!loadGroupContextLocked(groupId, groupName, adminUsername, memberUsernames, error)) {
+            return false;
+        }
+
+        Statement statement(db_,
+                            "SELECT "
+                            "  m.id,"
+                            "  m.created_at,"
+                            "  m.sender,"
+                            "  m.body,"
+                            "  COALESCE(m.reply_to_message_id, 0),"
+                            "  COALESCE(reply.sender, ''),"
+                            "  COALESCE(reply.body, ''),"
+                            "  COALESCE(m.forward_from_message_id, 0),"
+                            "  COALESCE(fwd.sender, ''),"
+                            "  COALESCE(fwd.body, '') "
+                            "FROM ("
+                            "  SELECT id, created_at, sender, body, reply_to_message_id, forward_from_message_id "
+                            "  FROM group_messages "
+                            "  WHERE group_id = ? "
+                            "  ORDER BY id DESC "
+                            "  LIMIT ?"
+                            ") m "
+                            "LEFT JOIN group_messages reply ON reply.id = m.reply_to_message_id "
+                            "LEFT JOIN group_messages fwd ON fwd.id = m.forward_from_message_id "
+                            "ORDER BY m.id ASC;",
+                            error);
+        if (!statement) {
+            return false;
+        }
+
+        sqlite3_bind_int64(statement.get(), 1, groupId);
+        sqlite3_bind_int(statement.get(), 2, limit);
+
+        while (true) {
+            const int result = sqlite3_step(statement.get());
+            if (result == SQLITE_DONE) {
+                Statement upsert(db_,
+                                 "INSERT INTO group_reads(group_id, username, last_read_message_id, updated_at) "
+                                 "SELECT ?, ?, COALESCE(MAX(id), 0), CURRENT_TIMESTAMP FROM group_messages WHERE group_id = ? "
+                                 "ON CONFLICT(group_id, username) DO UPDATE SET "
+                                 "last_read_message_id = excluded.last_read_message_id, "
+                                 "updated_at = CURRENT_TIMESTAMP;",
+                                 error);
+                if (!upsert) {
+                    return false;
+                }
+                sqlite3_bind_int64(upsert.get(), 1, groupId);
+                sqlite3_bind_text(upsert.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(upsert.get(), 3, groupId);
+                if (sqlite3_step(upsert.get()) != SQLITE_DONE) {
+                    error = lastError(db_);
+                    return false;
+                }
+                return true;
+            }
+
+            if (result != SQLITE_ROW) {
+                error = lastError(db_);
+                return false;
+            }
+
+            auto columnText = [&](int column) -> std::string {
+                const auto* value = sqlite3_column_text(statement.get(), column);
+                return value ? reinterpret_cast<const char*>(value) : "";
+            };
+
+            StoredMessage item;
+            item.id = sqlite3_column_int64(statement.get(), 0);
+            item.createdAt = columnText(1);
+            item.sender = columnText(2);
+            item.recipient = groupName;
+            item.text = columnText(3);
+            item.replyToMessageId = sqlite3_column_int64(statement.get(), 4);
+            item.replyToSender = columnText(5);
+            item.replyToText = columnText(6);
+            item.forwardFromMessageId = sqlite3_column_int64(statement.get(), 7);
+            item.forwardFromSender = columnText(8);
+            item.forwardFromText = columnText(9);
+            messages.push_back(item);
+        }
+    }
+
     long long conversationId = 0;
     if (!findConversationLocked(user, peer, conversationId, error)) {
         return false;
@@ -732,6 +1024,36 @@ bool MessageStore::markConversationRead(const std::string& user,
                                         const std::string& peer,
                                         std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
+
+    long long groupId = 0;
+    if (parseGroupChatId(peer, groupId)) {
+        bool isMember = false;
+        if (!isGroupMemberLocked(groupId, user, isMember, error)) {
+            return false;
+        }
+        if (!isMember) {
+            return true;
+        }
+
+        Statement upsert(db_,
+                         "INSERT INTO group_reads(group_id, username, last_read_message_id, updated_at) "
+                         "SELECT ?, ?, COALESCE(MAX(id), 0), CURRENT_TIMESTAMP FROM group_messages WHERE group_id = ? "
+                         "ON CONFLICT(group_id, username) DO UPDATE SET "
+                         "last_read_message_id = excluded.last_read_message_id, "
+                         "updated_at = CURRENT_TIMESTAMP;",
+                         error);
+        if (!upsert) {
+            return false;
+        }
+        sqlite3_bind_int64(upsert.get(), 1, groupId);
+        sqlite3_bind_text(upsert.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(upsert.get(), 3, groupId);
+        if (sqlite3_step(upsert.get()) != SQLITE_DONE) {
+            error = lastError(db_);
+            return false;
+        }
+        return true;
+    }
 
     long long conversationId = 0;
     if (!findConversationLocked(user, peer, conversationId, error)) {
@@ -866,6 +1188,510 @@ bool MessageStore::deleteConversation(const std::string& user,
     return executeLocked("COMMIT;", error);
 }
 
+bool MessageStore::createGroup(const std::string& creator,
+                               const std::string& name,
+                               const std::string& adminUsername,
+                               const std::vector<std::string>& members,
+                               long long& groupId,
+                               std::string& error) {
+    groupId = 0;
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    bool creatorExists = false;
+    bool adminExists = false;
+    if (!userExistsLocked(creator, creatorExists, error) ||
+        !userExistsLocked(adminUsername, adminExists, error)) {
+        return false;
+    }
+    if (!creatorExists || !adminExists) {
+        error = "unknown user";
+        return false;
+    }
+
+    if (!executeLocked("BEGIN IMMEDIATE TRANSACTION;", error)) {
+        return false;
+    }
+
+    Statement createGroupStatement(db_,
+                                   "INSERT INTO groups_chat(name, admin_username) VALUES (?, ?);",
+                                   error);
+    if (!createGroupStatement) {
+        executeLocked("ROLLBACK;", error);
+        return false;
+    }
+    sqlite3_bind_text(createGroupStatement.get(), 1, name.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(createGroupStatement.get(), 2, adminUsername.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(createGroupStatement.get()) != SQLITE_DONE) {
+        error = lastError(db_);
+        executeLocked("ROLLBACK;", error);
+        return false;
+    }
+
+    groupId = sqlite3_last_insert_rowid(db_);
+
+    Statement memberStatement(db_,
+                              "INSERT OR IGNORE INTO group_members(group_id, username) VALUES (?, ?);",
+                              error);
+    if (!memberStatement) {
+        executeLocked("ROLLBACK;", error);
+        return false;
+    }
+
+    for (const auto& username : members) {
+        sqlite3_reset(memberStatement.get());
+        sqlite3_clear_bindings(memberStatement.get());
+        sqlite3_bind_int64(memberStatement.get(), 1, groupId);
+        sqlite3_bind_text(memberStatement.get(), 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(memberStatement.get()) != SQLITE_DONE) {
+            error = lastError(db_);
+            executeLocked("ROLLBACK;", error);
+            return false;
+        }
+    }
+
+    if (!executeLocked("COMMIT;", error)) {
+        executeLocked("ROLLBACK;", error);
+        return false;
+    }
+
+    return true;
+}
+
+bool MessageStore::fetchGroupInfo(const std::string& requester,
+                                  long long groupId,
+                                  GroupInfo& info,
+                                  std::vector<GroupMemberInfo>& members,
+                                  std::string& error) {
+    info = GroupInfo{};
+    members.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    bool isMember = false;
+    if (!isGroupMemberLocked(groupId, requester, isMember, error)) {
+        return false;
+    }
+    if (!isMember) {
+        error = "group not found";
+        return false;
+    }
+
+    Statement infoStatement(db_,
+                            "SELECT name, admin_username FROM groups_chat WHERE id = ?;",
+                            error);
+    if (!infoStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(infoStatement.get(), 1, groupId);
+    const int infoResult = sqlite3_step(infoStatement.get());
+    if (infoResult != SQLITE_ROW) {
+        error = infoResult == SQLITE_DONE ? "group not found" : lastError(db_);
+        return false;
+    }
+
+    const auto* rawName = sqlite3_column_text(infoStatement.get(), 0);
+    const auto* rawAdmin = sqlite3_column_text(infoStatement.get(), 1);
+    info.chatId = groupChatId(groupId);
+    info.name = rawName ? reinterpret_cast<const char*>(rawName) : "";
+    info.adminUsername = rawAdmin ? reinterpret_cast<const char*>(rawAdmin) : "";
+    info.canManage = info.adminUsername == requester;
+
+    Statement membersStatement(db_,
+                               "SELECT username FROM group_members WHERE group_id = ? ORDER BY username ASC;",
+                               error);
+    if (!membersStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(membersStatement.get(), 1, groupId);
+
+    while (true) {
+      const int result = sqlite3_step(membersStatement.get());
+      if (result == SQLITE_DONE) {
+        return true;
+      }
+      if (result != SQLITE_ROW) {
+        error = lastError(db_);
+        return false;
+      }
+      const auto* rawUser = sqlite3_column_text(membersStatement.get(), 0);
+      const std::string username = rawUser ? reinterpret_cast<const char*>(rawUser) : "";
+      members.push_back({username, username == info.adminUsername});
+    }
+}
+
+bool MessageStore::addGroupMembers(const std::string& requester,
+                                   long long groupId,
+                                   const std::vector<std::string>& usernames,
+                                   std::vector<std::string>& addedUsers,
+                                   std::string& error) {
+    addedUsers.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    std::string groupName;
+    std::string adminUsername;
+    std::vector<std::string> memberUsernames;
+    if (!loadGroupContextLocked(groupId, groupName, adminUsername, memberUsernames, error)) {
+        return false;
+    }
+    if (groupName.empty()) {
+        error = "group not found";
+        return false;
+    }
+    if (adminUsername != requester) {
+        error = "only admin can add members";
+        return false;
+    }
+
+    Statement insert(db_,
+                     "INSERT OR IGNORE INTO group_members(group_id, username) VALUES (?, ?);",
+                     error);
+    if (!insert) {
+        return false;
+    }
+
+    for (const auto& username : usernames) {
+        bool exists = false;
+        if (!userExistsLocked(username, exists, error)) {
+            return false;
+        }
+        if (!exists) {
+            continue;
+        }
+
+        sqlite3_reset(insert.get());
+        sqlite3_clear_bindings(insert.get());
+        sqlite3_bind_int64(insert.get(), 1, groupId);
+        sqlite3_bind_text(insert.get(), 2, username.c_str(), -1, SQLITE_TRANSIENT);
+        if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+            error = lastError(db_);
+            return false;
+        }
+        if (sqlite3_changes(db_) > 0) {
+            addedUsers.push_back(username);
+        }
+    }
+    return true;
+}
+
+bool MessageStore::removeGroupMember(const std::string& requester,
+                                     long long groupId,
+                                     const std::string& username,
+                                     std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string groupName;
+    std::string adminUsername;
+    std::vector<std::string> memberUsernames;
+    if (!loadGroupContextLocked(groupId, groupName, adminUsername, memberUsernames, error)) {
+        return false;
+    }
+    if (groupName.empty()) {
+        error = "group not found";
+        return false;
+    }
+    if (adminUsername != requester) {
+        error = "only admin can remove members";
+        return false;
+    }
+    if (username == requester) {
+        error = "admin cannot remove themselves";
+        return false;
+    }
+
+    Statement removeStatement(db_,
+                              "DELETE FROM group_members WHERE group_id = ? AND username = ?;",
+                              error);
+    if (!removeStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(removeStatement.get(), 1, groupId);
+    sqlite3_bind_text(removeStatement.get(), 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(removeStatement.get()) != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+    if (sqlite3_changes(db_) == 0) {
+        error = "member not found";
+        return false;
+    }
+    return true;
+}
+
+bool MessageStore::transferGroupAdmin(const std::string& requester,
+                                      long long groupId,
+                                      const std::string& newAdminUsername,
+                                      std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string groupName;
+    std::string adminUsername;
+    std::vector<std::string> memberUsernames;
+    if (!loadGroupContextLocked(groupId, groupName, adminUsername, memberUsernames, error)) {
+        return false;
+    }
+    if (groupName.empty()) {
+        error = "group not found";
+        return false;
+    }
+    if (adminUsername != requester) {
+        error = "only admin can transfer admin";
+        return false;
+    }
+    bool isMember = false;
+    if (!isGroupMemberLocked(groupId, newAdminUsername, isMember, error)) {
+        return false;
+    }
+    if (!isMember) {
+        error = "new admin must be a group member";
+        return false;
+    }
+
+    Statement updateStatement(db_,
+                              "UPDATE groups_chat SET admin_username = ? WHERE id = ?;",
+                              error);
+    if (!updateStatement) {
+        return false;
+    }
+    sqlite3_bind_text(updateStatement.get(), 1, newAdminUsername.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(updateStatement.get(), 2, groupId);
+    if (sqlite3_step(updateStatement.get()) != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+    return true;
+}
+
+bool MessageStore::leaveGroup(const std::string& requester,
+                              long long groupId,
+                              std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string groupName;
+    std::string adminUsername;
+    std::vector<std::string> memberUsernames;
+    if (!loadGroupContextLocked(groupId, groupName, adminUsername, memberUsernames, error)) {
+        return false;
+    }
+    if (groupName.empty()) {
+        error = "group not found";
+        return false;
+    }
+    if (adminUsername == requester) {
+        error = "admin cannot leave the group";
+        return false;
+    }
+
+    Statement deleteStatement(db_,
+                              "DELETE FROM group_members WHERE group_id = ? AND username = ?;",
+                              error);
+    if (!deleteStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(deleteStatement.get(), 1, groupId);
+    sqlite3_bind_text(deleteStatement.get(), 2, requester.c_str(), -1, SQLITE_TRANSIENT);
+    if (sqlite3_step(deleteStatement.get()) != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+    if (sqlite3_changes(db_) == 0) {
+        error = "group not found";
+        return false;
+    }
+    return true;
+}
+
+bool MessageStore::deleteGroup(const std::string& requester,
+                               long long groupId,
+                               std::vector<std::string>& removedUsers,
+                               std::string& error) {
+    removedUsers.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string groupName;
+    std::string adminUsername;
+    if (!loadGroupContextLocked(groupId, groupName, adminUsername, removedUsers, error)) {
+        return false;
+    }
+    if (groupName.empty()) {
+        error = "group not found";
+        return false;
+    }
+    if (adminUsername != requester) {
+        error = "only admin can delete the group";
+        return false;
+    }
+
+    Statement deleteStatement(db_,
+                              "DELETE FROM groups_chat WHERE id = ?;",
+                              error);
+    if (!deleteStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(deleteStatement.get(), 1, groupId);
+    if (sqlite3_step(deleteStatement.get()) != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+    return true;
+}
+
+bool MessageStore::saveGroupMessage(const std::string& sender,
+                                    long long groupId,
+                                    const std::string& text,
+                                    long long replyToMessageId,
+                                    long long forwardFromMessageId,
+                                    StoredMessage& storedMessage,
+                                    std::string& groupName,
+                                    std::vector<std::string>& memberUsernames,
+                                    std::string& error) {
+    storedMessage = StoredMessage{};
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string adminUsername;
+    if (!loadGroupContextLocked(groupId, groupName, adminUsername, memberUsernames, error)) {
+        return false;
+    }
+    if (groupName.empty()) {
+        error = "group not found";
+        return false;
+    }
+    if (sender != "System") {
+        bool isMember = false;
+        if (!isGroupMemberLocked(groupId, sender, isMember, error)) {
+            return false;
+        }
+        if (!isMember) {
+            error = "you are not a member of this group";
+            return false;
+        }
+    }
+
+    std::string replyToSender;
+    std::string replyToText;
+    if (replyToMessageId > 0) {
+        Statement replyStatement(db_,
+                                 "SELECT sender, body FROM group_messages WHERE id = ? AND group_id = ?;",
+                                 error);
+        if (!replyStatement) {
+            return false;
+        }
+        sqlite3_bind_int64(replyStatement.get(), 1, replyToMessageId);
+        sqlite3_bind_int64(replyStatement.get(), 2, groupId);
+        const int replyResult = sqlite3_step(replyStatement.get());
+        if (replyResult != SQLITE_ROW) {
+            error = replyResult == SQLITE_DONE ? "reply target not found" : lastError(db_);
+            return false;
+        }
+        const auto* rawSender = sqlite3_column_text(replyStatement.get(), 0);
+        const auto* rawText = sqlite3_column_text(replyStatement.get(), 1);
+        replyToSender = rawSender ? reinterpret_cast<const char*>(rawSender) : "";
+        replyToText = rawText ? reinterpret_cast<const char*>(rawText) : "";
+    }
+
+    std::string forwardFromSender;
+    std::string forwardFromText;
+    if (forwardFromMessageId > 0) {
+        Statement forwardStatement(db_,
+                                   "SELECT m.sender, m.body "
+                                   "FROM group_messages m "
+                                   "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
+                                   "WHERE m.id = ?;",
+                                   error);
+        if (!forwardStatement) {
+            return false;
+        }
+        sqlite3_bind_text(forwardStatement.get(), 1, sender.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(forwardStatement.get(), 2, forwardFromMessageId);
+        const int forwardResult = sqlite3_step(forwardStatement.get());
+        if (forwardResult == SQLITE_ROW) {
+            const auto* rawSender = sqlite3_column_text(forwardStatement.get(), 0);
+            const auto* rawText = sqlite3_column_text(forwardStatement.get(), 1);
+            forwardFromSender = rawSender ? reinterpret_cast<const char*>(rawSender) : "";
+            forwardFromText = rawText ? reinterpret_cast<const char*>(rawText) : "";
+        } else if (forwardResult == SQLITE_DONE) {
+            Statement directForward(db_,
+                                    "SELECT m.sender, m.body "
+                                    "FROM messages m "
+                                    "JOIN conversations c ON c.id = m.conversation_id "
+                                    "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
+                                    error);
+            if (!directForward) {
+                return false;
+            }
+            sqlite3_bind_int64(directForward.get(), 1, forwardFromMessageId);
+            sqlite3_bind_text(directForward.get(), 2, sender.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(directForward.get(), 3, sender.c_str(), -1, SQLITE_TRANSIENT);
+            const int directResult = sqlite3_step(directForward.get());
+            if (directResult != SQLITE_ROW) {
+                error = directResult == SQLITE_DONE ? "forward target not found" : lastError(db_);
+                return false;
+            }
+            const auto* rawSender = sqlite3_column_text(directForward.get(), 0);
+            const auto* rawText = sqlite3_column_text(directForward.get(), 1);
+            forwardFromSender = rawSender ? reinterpret_cast<const char*>(rawSender) : "";
+            forwardFromText = rawText ? reinterpret_cast<const char*>(rawText) : "";
+        } else {
+            error = lastError(db_);
+            return false;
+        }
+    }
+
+    Statement insert(db_,
+                     "INSERT INTO group_messages(group_id, sender, body, reply_to_message_id, forward_from_message_id) "
+                     "VALUES (?, ?, ?, NULLIF(?, 0), NULLIF(?, 0));",
+                     error);
+    if (!insert) {
+        return false;
+    }
+    sqlite3_bind_int64(insert.get(), 1, groupId);
+    sqlite3_bind_text(insert.get(), 2, sender.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(insert.get(), 3, text.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(insert.get(), 4, replyToMessageId);
+    sqlite3_bind_int64(insert.get(), 5, forwardFromMessageId);
+    if (sqlite3_step(insert.get()) != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+
+    storedMessage.id = sqlite3_last_insert_rowid(db_);
+    storedMessage.sender = sender;
+    storedMessage.recipient = groupName;
+    storedMessage.text = text;
+    storedMessage.replyToMessageId = replyToMessageId;
+    storedMessage.replyToSender = replyToSender;
+    storedMessage.replyToText = replyToText;
+    storedMessage.forwardFromMessageId = forwardFromMessageId;
+    storedMessage.forwardFromSender = forwardFromSender;
+    storedMessage.forwardFromText = forwardFromText;
+
+    Statement createdAtStatement(db_,
+                                 "SELECT created_at FROM group_messages WHERE id = ?;",
+                                 error);
+    if (!createdAtStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(createdAtStatement.get(), 1, storedMessage.id);
+    const int createdAtResult = sqlite3_step(createdAtStatement.get());
+    if (createdAtResult != SQLITE_ROW) {
+        error = createdAtResult == SQLITE_DONE ? "saved message not found" : lastError(db_);
+        return false;
+    }
+    const auto* rawCreatedAt = sqlite3_column_text(createdAtStatement.get(), 0);
+    storedMessage.createdAt = rawCreatedAt ? reinterpret_cast<const char*>(rawCreatedAt) : "";
+    return true;
+}
+
+bool MessageStore::saveGroupSystemMessage(long long groupId,
+                                          const std::string& text,
+                                          StoredMessage& storedMessage,
+                                          std::string& groupName,
+                                          std::vector<std::string>& memberUsernames,
+                                          std::string& error) {
+    return saveGroupMessage("System",
+                            groupId,
+                            text,
+                            0,
+                            0,
+                            storedMessage,
+                            groupName,
+                            memberUsernames,
+                            error);
+}
+
 bool MessageStore::executeLocked(const char* sql, std::string& error) {
     char* rawError = nullptr;
     const int result = sqlite3_exec(db_, sql, nullptr, nullptr, &rawError);
@@ -894,6 +1720,19 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
         "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         "  UNIQUE(user_low, user_high)"
         ");"
+        "CREATE TABLE IF NOT EXISTS groups_chat ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  name TEXT NOT NULL,"
+        "  admin_username TEXT NOT NULL,"
+        "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        ");"
+        "CREATE TABLE IF NOT EXISTS group_members ("
+        "  group_id INTEGER NOT NULL,"
+        "  username TEXT NOT NULL,"
+        "  joined_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  UNIQUE(group_id, username),"
+        "  FOREIGN KEY(group_id) REFERENCES groups_chat(id) ON DELETE CASCADE"
+        ");"
         "CREATE TABLE IF NOT EXISTS messages ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
         "  conversation_id INTEGER NOT NULL,"
@@ -916,7 +1755,31 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
         "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id "
         "ON messages(conversation_id, id);"
         "CREATE INDEX IF NOT EXISTS idx_conversation_reads_user "
-        "ON conversation_reads(username, conversation_id);",
+        "ON conversation_reads(username, conversation_id);"
+        "CREATE TABLE IF NOT EXISTS group_messages ("
+        "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "  group_id INTEGER NOT NULL,"
+        "  sender TEXT NOT NULL,"
+        "  body TEXT NOT NULL,"
+        "  reply_to_message_id INTEGER,"
+        "  forward_from_message_id INTEGER,"
+        "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  FOREIGN KEY(group_id) REFERENCES groups_chat(id) ON DELETE CASCADE"
+        ");"
+        "CREATE TABLE IF NOT EXISTS group_reads ("
+        "  group_id INTEGER NOT NULL,"
+        "  username TEXT NOT NULL,"
+        "  last_read_message_id INTEGER NOT NULL DEFAULT 0,"
+        "  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  UNIQUE(group_id, username),"
+        "  FOREIGN KEY(group_id) REFERENCES groups_chat(id) ON DELETE CASCADE"
+        ");"
+        "CREATE INDEX IF NOT EXISTS idx_group_members_username "
+        "ON group_members(username, group_id);"
+        "CREATE INDEX IF NOT EXISTS idx_group_messages_group_id "
+        "ON group_messages(group_id, id);"
+        "CREATE INDEX IF NOT EXISTS idx_group_reads_user "
+        "ON group_reads(username, group_id);",
         error)) {
         return false;
     }
@@ -981,6 +1844,110 @@ bool MessageStore::userExistsLocked(const std::string& username, bool& exists, s
 
     error = lastError(db_);
     return false;
+}
+
+bool MessageStore::loadGroupContextLocked(long long groupId,
+                                          std::string& groupName,
+                                          std::string& adminUsername,
+                                          std::vector<std::string>& memberUsernames,
+                                          std::string& error) {
+    groupName.clear();
+    adminUsername.clear();
+    memberUsernames.clear();
+
+    Statement groupStatement(db_,
+                             "SELECT name, admin_username FROM groups_chat WHERE id = ?;",
+                             error);
+    if (!groupStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(groupStatement.get(), 1, groupId);
+    const int groupResult = sqlite3_step(groupStatement.get());
+    if (groupResult == SQLITE_DONE) {
+        return true;
+    }
+    if (groupResult != SQLITE_ROW) {
+        error = lastError(db_);
+        return false;
+    }
+
+    const auto* rawName = sqlite3_column_text(groupStatement.get(), 0);
+    const auto* rawAdmin = sqlite3_column_text(groupStatement.get(), 1);
+    groupName = rawName ? reinterpret_cast<const char*>(rawName) : "";
+    adminUsername = rawAdmin ? reinterpret_cast<const char*>(rawAdmin) : "";
+
+    Statement memberStatement(db_,
+                              "SELECT username FROM group_members WHERE group_id = ? ORDER BY username ASC;",
+                              error);
+    if (!memberStatement) {
+        return false;
+    }
+    sqlite3_bind_int64(memberStatement.get(), 1, groupId);
+    while (true) {
+        const int result = sqlite3_step(memberStatement.get());
+        if (result == SQLITE_DONE) {
+            return true;
+        }
+        if (result != SQLITE_ROW) {
+            error = lastError(db_);
+            return false;
+        }
+        const auto* rawUser = sqlite3_column_text(memberStatement.get(), 0);
+        memberUsernames.push_back(rawUser ? reinterpret_cast<const char*>(rawUser) : "");
+    }
+}
+
+bool MessageStore::isGroupMemberLocked(long long groupId,
+                                       const std::string& username,
+                                       bool& isMember,
+                                       std::string& error) {
+    isMember = false;
+    Statement statement(db_,
+                        "SELECT 1 FROM group_members WHERE group_id = ? AND username = ? LIMIT 1;",
+                        error);
+    if (!statement) {
+        return false;
+    }
+    sqlite3_bind_int64(statement.get(), 1, groupId);
+    sqlite3_bind_text(statement.get(), 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_ROW) {
+        isMember = true;
+        return true;
+    }
+    if (result == SQLITE_DONE) {
+        return true;
+    }
+    error = lastError(db_);
+    return false;
+}
+
+bool MessageStore::resolveChatIdLocked(const std::string& user,
+                                       const std::string& chatId,
+                                       bool& isGroup,
+                                       long long& numericId,
+                                       std::string& error) {
+    isGroup = false;
+    numericId = 0;
+    long long groupId = 0;
+    if (parseGroupChatId(chatId, groupId)) {
+        bool isMember = false;
+        if (!isGroupMemberLocked(groupId, user, isMember, error)) {
+            return false;
+        }
+        if (!isMember) {
+            error = "group not found";
+            return false;
+        }
+        isGroup = true;
+        numericId = groupId;
+        return true;
+    }
+
+    if (!findConversationLocked(user, chatId, numericId, error)) {
+        return false;
+    }
+    return true;
 }
 
 bool MessageStore::findConversationLocked(const std::string& user,

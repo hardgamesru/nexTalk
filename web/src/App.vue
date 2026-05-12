@@ -9,14 +9,17 @@ type ProtocolMessage = {
 type ChatItem = {
   peerId: string;
   peer: string;
+  kind: "dm" | "group";
   lastAt: string;
   lastSender: string;
   lastText: string;
   unreadCount: number;
+  canManage: boolean;
 };
 
 type ChatMessage = {
   id: number;
+  chatId: string;
   createdAt: string;
   sender: string;
   recipient: string;
@@ -69,7 +72,9 @@ const ui = reactive({
   messageDraft: "",
   chatFilter: "",
   historyLimit: 30,
+  showNewChatChoice: false,
   showAddChat: false,
+  showCreateGroup: false,
   searchQuery: "",
   searchInFlight: false,
   logs: [] as string[],
@@ -84,6 +89,22 @@ const ui = reactive({
   forwardPreviewMessage: null as ChatMessage | null,
   forwardRecipient: "",
   forwardDraft: "",
+  createGroupName: "",
+  createGroupAdmin: "",
+  createGroupSelectedUsers: [] as SearchUser[],
+  createGroupSearchQuery: "",
+  createGroupSearchInFlight: false,
+  createGroupSearchResults: [] as SearchUser[],
+  showGroupSettings: false,
+  groupSettingsLoading: false,
+  groupSettingsTitle: "",
+  groupSettingsChatId: "",
+  groupSettingsAdminUsername: "",
+  groupSettingsCanManage: false,
+  groupSettingsMembers: [] as { username: string; isAdmin: boolean }[],
+  groupAddSearchQuery: "",
+  groupAddSearchInFlight: false,
+  groupAddSearchResults: [] as SearchUser[],
 });
 
 const chats = ref<ChatItem[]>([]);
@@ -123,12 +144,25 @@ const currentMessages = computed(() => {
   return messagesByPeer[peer] ?? [];
 });
 
+const selectedChat = computed(() => {
+  const chatId = session.selectedPeer;
+  return chatId ? chatIndex[chatId] ?? null : null;
+});
+
+const selectedChatTitle = computed(() => {
+  return selectedChat.value?.peer ?? "";
+});
+
+const canOpenGroupSettings = computed(() => {
+  return selectedChat.value?.kind === "group";
+});
+
 const profileInitial = computed(() => {
   return (session.currentUser || "?").slice(0, 1).toUpperCase();
 });
 
 const forwardableChats = computed(() => {
-  return chats.value.filter((chat) => chat.peer !== session.currentUser);
+  return chats.value.filter((chat) => !(chat.kind === "dm" && chat.peer === session.currentUser));
 });
 
 function pushLog(text: string) {
@@ -161,7 +195,7 @@ function formatServerTime(value: string) {
 }
 
 function parseChatMessage(fields: string[], offset = 0) {
-  if (fields.length < offset + 5) {
+  if (fields.length < offset + 6) {
     return null;
   }
 
@@ -170,28 +204,29 @@ function parseChatMessage(fields: string[], offset = 0) {
     return null;
   }
 
-  const replyToRaw = fields[offset + 5] ?? "";
+  const replyToRaw = fields[offset + 6] ?? "";
   const replyToMessageId = replyToRaw ? Number.parseInt(replyToRaw, 10) : null;
-  const forwardFromRaw = fields[offset + 8] ?? "";
+  const forwardFromRaw = fields[offset + 9] ?? "";
   const forwardFromMessageId = forwardFromRaw ? Number.parseInt(forwardFromRaw, 10) : null;
 
   return {
     id,
-    createdAt: fields[offset + 1] ?? "",
-    sender: fields[offset + 2] ?? "",
-    recipient: fields[offset + 3] ?? "",
-    text: fields[offset + 4] ?? "",
+    chatId: fields[offset + 1] ?? "",
+    createdAt: fields[offset + 2] ?? "",
+    sender: fields[offset + 3] ?? "",
+    recipient: fields[offset + 4] ?? "",
+    text: fields[offset + 5] ?? "",
     replyToMessageId: replyToMessageId && Number.isFinite(replyToMessageId) ? replyToMessageId : null,
-    replyToSender: fields[offset + 6] ?? "",
-    replyToText: fields[offset + 7] ?? "",
+    replyToSender: fields[offset + 7] ?? "",
+    replyToText: fields[offset + 8] ?? "",
     forwardFromMessageId: forwardFromMessageId && Number.isFinite(forwardFromMessageId) ? forwardFromMessageId : null,
-    forwardFromSender: fields[offset + 9] ?? "",
-    forwardFromText: fields[offset + 10] ?? "",
+    forwardFromSender: fields[offset + 10] ?? "",
+    forwardFromText: fields[offset + 11] ?? "",
   } as ChatMessage;
 }
 
 function peerForMessage(message: ChatMessage) {
-  return message.sender === session.currentUser ? message.recipient : message.sender;
+  return message.chatId || (message.sender === session.currentUser ? message.recipient : message.sender);
 }
 
 function excerpt(value: string, limit = 90) {
@@ -273,6 +308,7 @@ function clearSessionData() {
   session.selectedPeer = "";
   ui.messageDraft = "";
   ui.chatFilter = "";
+  ui.showNewChatChoice = false;
   ui.replyTarget = null;
   ui.contextMenuVisible = false;
   ui.contextMenuMessageId = 0;
@@ -282,6 +318,20 @@ function clearSessionData() {
   ui.forwardPreviewMessage = null;
   ui.forwardRecipient = "";
   ui.forwardDraft = "";
+  ui.showCreateGroup = false;
+  ui.createGroupName = "";
+  ui.createGroupAdmin = "";
+  ui.createGroupSelectedUsers = [];
+  ui.createGroupSearchQuery = "";
+  ui.createGroupSearchResults = [];
+  ui.showGroupSettings = false;
+  ui.groupSettingsChatId = "";
+  ui.groupSettingsTitle = "";
+  ui.groupSettingsAdminUsername = "";
+  ui.groupSettingsCanManage = false;
+  ui.groupSettingsMembers = [];
+  ui.groupAddSearchQuery = "";
+  ui.groupAddSearchResults = [];
   searchResults.value = [];
   Object.keys(chatIndex).forEach((key) => {
     delete chatIndex[key];
@@ -490,15 +540,40 @@ function fetchChats() {
 }
 
 function openAddChat() {
+  ui.showNewChatChoice = true;
+}
+
+function openDirectChatCreator() {
+  ui.showNewChatChoice = false;
   ui.showAddChat = true;
   ui.searchQuery = "";
   searchResults.value = [];
 }
 
+function openGroupChatCreator() {
+  ui.showNewChatChoice = false;
+  ui.showCreateGroup = true;
+  ui.createGroupName = "";
+  ui.createGroupAdmin = session.currentUser;
+  ui.createGroupSelectedUsers = [];
+  ui.createGroupSearchQuery = "";
+  ui.createGroupSearchResults = [];
+}
+
 function closeAddChat() {
+  ui.showNewChatChoice = false;
   ui.showAddChat = false;
   ui.searchQuery = "";
   searchResults.value = [];
+}
+
+function closeCreateGroup() {
+  ui.showCreateGroup = false;
+  ui.createGroupName = "";
+  ui.createGroupAdmin = "";
+  ui.createGroupSelectedUsers = [];
+  ui.createGroupSearchQuery = "";
+  ui.createGroupSearchResults = [];
 }
 
 function runUserSearch() {
@@ -510,6 +585,41 @@ function runUserSearch() {
   searchResults.value = [];
   ui.searchInFlight = true;
   sendCommand("search_users", [query]);
+}
+
+function runCreateGroupSearch() {
+  const query = ui.createGroupSearchQuery.trim();
+  if (!query) {
+    return;
+  }
+  pendingSearchQuery.value = query;
+  ui.createGroupSearchResults = [];
+  ui.createGroupSearchInFlight = true;
+  sendCommand("search_users", [query, "group_create"]);
+}
+
+function toggleCreateGroupUser(user: SearchUser) {
+  const existingIndex = ui.createGroupSelectedUsers.findIndex((item) => item.username === user.username);
+  if (existingIndex >= 0) {
+    ui.createGroupSelectedUsers.splice(existingIndex, 1);
+    if (ui.createGroupAdmin === user.username) {
+      ui.createGroupAdmin = session.currentUser;
+    }
+    return;
+  }
+  ui.createGroupSelectedUsers.push(user);
+}
+
+function createGroup() {
+  const name = ui.createGroupName.trim();
+  if (!name) {
+    pushLog("Group name is required");
+    return;
+  }
+
+  const usernames = ui.createGroupSelectedUsers.map((item) => item.username);
+  const adminUsername = ui.createGroupAdmin || session.currentUser;
+  sendCommand("create_group", [name, adminUsername, usernames.join(",")]);
 }
 
 function createChatFromSearch(user: SearchUser) {
@@ -580,7 +690,7 @@ function submitForward() {
     return;
   }
 
-  const fields = [peer, String(ui.forwardTarget.id)];
+  const fields = [peer, ui.forwardTarget.chatId, String(ui.forwardTarget.id)];
   if (ui.forwardDraft.trim()) {
     fields.push(ui.forwardDraft.trim());
   }
@@ -599,6 +709,95 @@ function openForwardPreview(message: ChatMessage) {
 
 function closeForwardPreview() {
   ui.forwardPreviewMessage = null;
+}
+
+function openGroupSettings() {
+  if (!selectedChat.value || selectedChat.value.kind !== "group") {
+    return;
+  }
+  ui.showGroupSettings = true;
+  ui.groupSettingsLoading = true;
+  ui.groupSettingsChatId = selectedChat.value.peerId;
+  ui.groupSettingsTitle = selectedChat.value.peer;
+  ui.groupSettingsMembers = [];
+  ui.groupAddSearchQuery = "";
+  ui.groupAddSearchResults = [];
+  sendCommand("get_group_info", [selectedChat.value.peerId]);
+}
+
+function closeGroupSettings() {
+  ui.showGroupSettings = false;
+  ui.groupSettingsLoading = false;
+  ui.groupSettingsChatId = "";
+  ui.groupSettingsMembers = [];
+  ui.groupAddSearchQuery = "";
+  ui.groupAddSearchResults = [];
+}
+
+function runGroupAddSearch() {
+  if (!ui.groupSettingsChatId) {
+    return;
+  }
+  const query = ui.groupAddSearchQuery.trim();
+  if (!query) {
+    return;
+  }
+  pendingSearchQuery.value = query;
+  ui.groupAddSearchResults = [];
+  ui.groupAddSearchInFlight = true;
+  sendCommand("search_users", [query, "group_add", ui.groupSettingsChatId]);
+}
+
+function addUserToGroup(user: SearchUser) {
+  if (!ui.groupSettingsChatId) {
+    return;
+  }
+  sendCommand("add_group_members", [ui.groupSettingsChatId, user.username]);
+}
+
+function removeUserFromGroup(username: string) {
+  if (!ui.groupSettingsChatId) {
+    return;
+  }
+  if (!confirm(`Remove ${username} from the group?`)) {
+    return;
+  }
+  if (!confirm(`Please confirm again: remove ${username}?`)) {
+    return;
+  }
+  sendCommand("remove_group_member", [ui.groupSettingsChatId, username]);
+}
+
+function transferAdmin(username: string) {
+  if (!ui.groupSettingsChatId || username === ui.groupSettingsAdminUsername) {
+    return;
+  }
+  sendCommand("transfer_group_admin", [ui.groupSettingsChatId, username]);
+}
+
+function leaveCurrentGroup() {
+  if (!ui.groupSettingsChatId) {
+    return;
+  }
+  if (!confirm("Leave this group?")) {
+    return;
+  }
+  sendCommand("leave_group", [ui.groupSettingsChatId]);
+  closeGroupSettings();
+}
+
+function deleteCurrentGroup() {
+  if (!ui.groupSettingsChatId) {
+    return;
+  }
+  if (!confirm("Delete this group for everyone?")) {
+    return;
+  }
+  if (!confirm("Please confirm again: delete this group for everyone?")) {
+    return;
+  }
+  sendCommand("delete_group", [ui.groupSettingsChatId]);
+  closeGroupSettings();
 }
 
 function jumpToMessage(messageId: number | null) {
@@ -671,7 +870,7 @@ onBeforeUnmount(() => {
 });
 
 function upsertChat(chat: ChatItem) {
-  chatIndex[chat.peer] = chat;
+  chatIndex[chat.peerId] = chat;
   chats.value = Object.values(chatIndex).sort((left, right) => {
     const leftTime = Date.parse(left.lastAt.replace(" ", "T"));
     const rightTime = Date.parse(right.lastAt.replace(" ", "T"));
@@ -736,7 +935,7 @@ function handleProtocolMessage(message: ProtocolMessage) {
           break;
         }
 
-        const peer = peerForMessage(sentMessage);
+        const peer = sentMessage.chatId || peerForMessage(sentMessage);
         pushMessage(peer, sentMessage);
         sendCommand("mark_read", [peer]);
       } else {
@@ -750,7 +949,7 @@ function handleProtocolMessage(message: ProtocolMessage) {
         break;
       }
 
-      const peer = peerForMessage(incomingMessage);
+      const peer = incomingMessage.chatId || peerForMessage(incomingMessage);
       pushMessage(peer, incomingMessage);
       if (session.selectedPeer === peer) {
         sendCommand("mark_read", [peer]);
@@ -765,7 +964,7 @@ function handleProtocolMessage(message: ProtocolMessage) {
         break;
       }
 
-      const peer = peerForMessage(historyMessage);
+      const peer = historyMessage.chatId || peerForMessage(historyMessage);
       pushMessage(peer, historyMessage);
       break;
     }
@@ -782,10 +981,12 @@ function handleProtocolMessage(message: ProtocolMessage) {
       upsertChat({
         peerId: a,
         peer: b,
-        lastAt: c,
-        lastSender: d,
-        lastText: e,
-        unreadCount: Number.parseInt(message.fields[5] ?? "0", 10) || 0,
+        kind: (c === "group" ? "group" : "dm"),
+        lastAt: d,
+        lastSender: e,
+        lastText: message.fields[5] ?? "",
+        unreadCount: Number.parseInt(message.fields[6] ?? "0", 10) || 0,
+        canManage: (message.fields[7] ?? "0") === "1",
       });
       break;
     case "chat_list_result":
@@ -795,10 +996,18 @@ function handleProtocolMessage(message: ProtocolMessage) {
       if (a !== pendingSearchQuery.value) {
         return;
       }
-      searchResults.value.push({ id: b, username: c });
+      if (ui.showAddChat) {
+        searchResults.value.push({ id: b, username: c });
+      } else if (ui.showCreateGroup) {
+        ui.createGroupSearchResults.push({ id: b, username: c });
+      } else if (ui.showGroupSettings) {
+        ui.groupAddSearchResults.push({ id: b, username: c });
+      }
       break;
     case "user_search_result":
       ui.searchInFlight = false;
+      ui.createGroupSearchInFlight = false;
+      ui.groupAddSearchInFlight = false;
       pushLog(`User search ${a}: ${b}`);
       break;
     case "create_chat_result":
@@ -806,11 +1015,21 @@ function handleProtocolMessage(message: ProtocolMessage) {
         closeAddChat();
         fetchChats();
         if (c) {
-          session.selectedPeer = c;
           selectPeer(c);
         }
       } else {
         pushLog(`Create chat error: ${b}`);
+      }
+      break;
+    case "create_group_result":
+      if (a === "ok") {
+        closeCreateGroup();
+        fetchChats();
+        if (b) {
+          selectPeer(b);
+        }
+      } else {
+        pushLog(`Create group error: ${b}`);
       }
       break;
     case "delete_chat_result":
@@ -838,6 +1057,44 @@ function handleProtocolMessage(message: ProtocolMessage) {
         pushLog("Mark read failed");
       }
       break;
+    case "group_member_item":
+      if (a === ui.groupSettingsChatId) {
+        ui.groupSettingsMembers.push({ username: b, isAdmin: c === "1" });
+      }
+      break;
+    case "group_info_result":
+      ui.groupSettingsLoading = false;
+      if (a === "ok") {
+        ui.groupSettingsChatId = b;
+        ui.groupSettingsTitle = c;
+        ui.groupSettingsAdminUsername = d;
+        ui.groupSettingsCanManage = e === "1";
+      } else {
+        pushLog(`Group info error: ${b}`);
+      }
+      break;
+    case "group_update_result":
+      pushLog(`Group update ${a}: ${b}`);
+      if (a === "ok") {
+        fetchChats();
+        if (ui.showGroupSettings && c) {
+          ui.groupSettingsMembers = [];
+          ui.groupSettingsLoading = true;
+          sendCommand("get_group_info", [c]);
+        }
+      }
+      break;
+    case "chat_removed": {
+      const removedChatId = a;
+      delete chatIndex[removedChatId];
+      chats.value = Object.values(chatIndex);
+      delete messagesByPeer[removedChatId];
+      if (session.selectedPeer === removedChatId) {
+        session.selectedPeer = "";
+      }
+      pushLog(b || "Chat removed");
+      break;
+    }
     default:
       pushLog(`Unhandled command: ${message.command}`);
       break;
@@ -885,20 +1142,20 @@ watch(
         <div class="chat-list">
           <button
             v-for="chat in filteredChats"
-            :key="chat.peer"
+            :key="chat.peerId"
             class="chat-row"
-            :class="{ active: session.selectedPeer === chat.peer }"
-            @click="selectPeer(chat.peer)"
+            :class="{ active: session.selectedPeer === chat.peerId }"
+            @click="selectPeer(chat.peerId)"
           >
             <div class="chat-row-main">
-              <strong>{{ chat.peer }}</strong>
+              <strong>{{ chat.kind === "group" ? `${chat.peer}` : chat.peer }}</strong>
               <span class="preview">
                 {{ chat.lastText ? `${chat.lastSender}: ${chat.lastText}` : "No messages yet" }}
               </span>
             </div>
             <div class="chat-row-actions">
-              <span v-if="chat.unreadCount > 0 && session.selectedPeer !== chat.peer" class="unread-dot"></span>
-              <button class="chat-delete" @click.stop="deleteChat(chat.peer)">x</button>
+              <span v-if="chat.unreadCount > 0 && session.selectedPeer !== chat.peerId" class="unread-dot"></span>
+              <button v-if="chat.kind === 'dm'" class="chat-delete" @click.stop="deleteChat(chat.peerId)">x</button>
             </div>
           </button>
         </div>
@@ -908,7 +1165,7 @@ watch(
     <main class="chat-main">
       <header class="topbar">
         <div>
-          <h2>{{ session.selectedPeer ? session.selectedPeer : "Привет" }}</h2>
+          <h2>{{ session.selectedPeer ? selectedChatTitle : "Привет" }}</h2>
           <p>
             {{
               session.selectedPeer
@@ -918,6 +1175,7 @@ watch(
           </p>
         </div>
         <div class="top-actions">
+          <button v-if="canOpenGroupSettings" class="small" @click="openGroupSettings">People</button>
           <label>History limit</label>
           <input v-model.number="ui.historyLimit" type="number" min="1" max="100" />
           <button class="small" @click="fetchChats" :disabled="!session.loggedIn">Refresh</button>
@@ -1006,6 +1264,18 @@ watch(
       </div>
     </section>
 
+    <section v-if="ui.showNewChatChoice" class="modal-wrap">
+      <div class="modal">
+        <button class="modal-close" type="button" @click="closeAddChat" aria-label="Close">x</button>
+        <h3>New chat</h3>
+        <p>Choose what you want to create.</p>
+        <div class="welcome-actions">
+          <button class="primary" @click="openDirectChatCreator">Direct chat</button>
+          <button class="secondary" @click="openGroupChatCreator">Group chat</button>
+        </div>
+      </div>
+    </section>
+
     <section v-if="ui.showAddChat" class="modal-wrap">
       <div class="modal">
         <button class="modal-close" type="button" @click="closeAddChat" aria-label="Close">x</button>
@@ -1028,6 +1298,50 @@ watch(
             <small>#{{ item.id }}</small>
           </button>
           <p v-if="!ui.searchInFlight && searchResults.length === 0">No results</p>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="ui.showCreateGroup" class="modal-wrap">
+      <div class="modal">
+        <button class="modal-close" type="button" @click="closeCreateGroup" aria-label="Close">x</button>
+        <h3>Create Group</h3>
+        <p>Select members and choose an administrator.</p>
+        <label>Group name</label>
+        <input v-model="ui.createGroupName" type="text" placeholder="Group name" />
+        <label>Find users</label>
+        <div class="modal-search">
+          <input v-model="ui.createGroupSearchQuery" type="text" placeholder="username" @keydown.enter.prevent="runCreateGroupSearch" />
+          <button class="small" @click="runCreateGroupSearch" :disabled="ui.createGroupSearchInFlight">
+            {{ ui.createGroupSearchInFlight ? "Searching..." : "Search" }}
+          </button>
+        </div>
+        <div class="search-results">
+          <button
+            v-for="item in ui.createGroupSearchResults"
+            :key="`group-user-${item.id}`"
+            class="search-row"
+            @click="toggleCreateGroupUser(item)"
+          >
+            <strong>{{ item.username }}</strong>
+            <small>{{ ui.createGroupSelectedUsers.some((user) => user.username === item.username) ? "selected" : "tap to add" }}</small>
+          </button>
+        </div>
+        <label>Administrator</label>
+        <select v-model="ui.createGroupAdmin">
+          <option :value="session.currentUser">{{ session.currentUser }}</option>
+          <option v-for="item in ui.createGroupSelectedUsers" :key="`admin-${item.username}`" :value="item.username">
+            {{ item.username }}
+          </option>
+        </select>
+        <div class="selected-chips">
+          <span class="member-chip self">{{ session.currentUser }} (you)</span>
+          <span v-for="item in ui.createGroupSelectedUsers" :key="`chip-${item.username}`" class="member-chip">
+            {{ item.username }}
+          </span>
+        </div>
+        <div class="modal-actions">
+          <button class="primary" @click="createGroup" :disabled="!ui.createGroupName.trim()">Create</button>
         </div>
       </div>
     </section>
@@ -1080,6 +1394,67 @@ watch(
         <div class="modal-actions">
           <button class="small" @click="closeForwardPreview">Close</button>
         </div>
+      </div>
+    </section>
+
+    <section v-if="ui.showGroupSettings" class="modal-wrap" @click.self="closeGroupSettings">
+      <div class="modal group-settings-modal">
+        <button class="modal-close" type="button" @click="closeGroupSettings" aria-label="Close">x</button>
+        <h3>{{ ui.groupSettingsCanManage ? "Group settings" : "Group members" }}</h3>
+        <p>{{ ui.groupSettingsTitle }}</p>
+        <div v-if="ui.groupSettingsLoading" class="search-results"><p>Loading...</p></div>
+        <template v-else>
+          <div class="search-results">
+            <div v-for="member in ui.groupSettingsMembers" :key="`member-${member.username}`" class="group-member-row">
+              <div>
+                <strong>{{ member.username }}</strong>
+                <small>{{ member.isAdmin ? "admin" : "member" }}</small>
+              </div>
+              <div class="group-member-actions">
+                <button
+                  v-if="ui.groupSettingsCanManage && !member.isAdmin && member.username !== session.currentUser"
+                  class="small"
+                  @click="removeUserFromGroup(member.username)"
+                >
+                  Remove
+                </button>
+                <button
+                  v-if="ui.groupSettingsCanManage && !member.isAdmin"
+                  class="small"
+                  @click="transferAdmin(member.username)"
+                >
+                  Make admin
+                </button>
+              </div>
+            </div>
+          </div>
+          <template v-if="ui.groupSettingsCanManage">
+            <label>Add members</label>
+            <div class="modal-search">
+              <input v-model="ui.groupAddSearchQuery" type="text" placeholder="username" @keydown.enter.prevent="runGroupAddSearch" />
+              <button class="small" @click="runGroupAddSearch" :disabled="ui.groupAddSearchInFlight">
+                {{ ui.groupAddSearchInFlight ? "Searching..." : "Search" }}
+              </button>
+            </div>
+            <div class="search-results">
+              <button
+                v-for="item in ui.groupAddSearchResults"
+                :key="`group-add-${item.id}`"
+                class="search-row"
+                @click="addUserToGroup(item)"
+              >
+                <strong>{{ item.username }}</strong>
+                <small>Add</small>
+              </button>
+            </div>
+            <div class="modal-actions">
+              <button class="danger" @click="deleteCurrentGroup">Delete group</button>
+            </div>
+          </template>
+          <div v-else class="modal-actions">
+            <button class="secondary" @click="leaveCurrentGroup">Leave group</button>
+          </div>
+        </template>
       </div>
     </section>
 

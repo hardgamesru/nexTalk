@@ -30,11 +30,25 @@ struct ChatSummary {
     std::string lastSender;
     std::string lastText;
     int unreadCount{0};
+    bool isGroup{false};
+    bool canManage{false};
 };
 
 struct UserSearchResult {
     std::string id;
     std::string username;
+};
+
+struct GroupMemberInfo {
+    std::string username;
+    bool isAdmin{false};
+};
+
+struct GroupInfo {
+    std::string chatId;
+    std::string name;
+    std::string adminUsername;
+    bool canManage{false};
 };
 
 /**
@@ -90,6 +104,8 @@ public:
                     std::string& error);
     bool searchUsers(const std::string& query,
                      const std::string& excludeUser,
+                     const std::string& scope,
+                     const std::string& scopeTarget,
                      int limit,
                      std::vector<UserSearchResult>& users,
                      std::string& error);
@@ -97,6 +113,52 @@ public:
                             long long peerId,
                             std::string& peerUsername,
                             std::string& error);
+    bool createGroup(const std::string& creator,
+                     const std::string& name,
+                     const std::string& adminUsername,
+                     const std::vector<std::string>& members,
+                     long long& groupId,
+                     std::string& error);
+    bool fetchGroupInfo(const std::string& requester,
+                        long long groupId,
+                        GroupInfo& info,
+                        std::vector<GroupMemberInfo>& members,
+                        std::string& error);
+    bool addGroupMembers(const std::string& requester,
+                         long long groupId,
+                         const std::vector<std::string>& usernames,
+                         std::vector<std::string>& addedUsers,
+                         std::string& error);
+    bool removeGroupMember(const std::string& requester,
+                           long long groupId,
+                           const std::string& username,
+                           std::string& error);
+    bool transferGroupAdmin(const std::string& requester,
+                            long long groupId,
+                            const std::string& newAdminUsername,
+                            std::string& error);
+    bool leaveGroup(const std::string& requester,
+                    long long groupId,
+                    std::string& error);
+    bool deleteGroup(const std::string& requester,
+                     long long groupId,
+                     std::vector<std::string>& removedUsers,
+                     std::string& error);
+    bool saveGroupMessage(const std::string& sender,
+                          long long groupId,
+                          const std::string& text,
+                          long long replyToMessageId,
+                          long long forwardFromMessageId,
+                          StoredMessage& storedMessage,
+                          std::string& groupName,
+                          std::vector<std::string>& memberUsernames,
+                          std::string& error);
+    bool saveGroupSystemMessage(long long groupId,
+                                const std::string& text,
+                                StoredMessage& storedMessage,
+                                std::string& groupName,
+                                std::vector<std::string>& memberUsernames,
+                                std::string& error);
     bool deleteConversation(const std::string& user,
                             const std::string& peer,
                             std::string& error);
@@ -112,6 +174,20 @@ private:
                             const std::string& definition,
                             std::string& error);
     bool userExistsLocked(const std::string& username, bool& exists, std::string& error);
+    bool loadGroupContextLocked(long long groupId,
+                                std::string& groupName,
+                                std::string& adminUsername,
+                                std::vector<std::string>& memberUsernames,
+                                std::string& error);
+    bool isGroupMemberLocked(long long groupId,
+                             const std::string& username,
+                             bool& isMember,
+                             std::string& error);
+    bool resolveChatIdLocked(const std::string& user,
+                             const std::string& chatId,
+                             bool& isGroup,
+                             long long& numericId,
+                             std::string& error);
     bool findConversationLocked(const std::string& user,
                                 const std::string& peer,
                                 long long& conversationId,
