@@ -12,13 +12,16 @@
 #include <QListWidget>
 #include <QListWidgetItem>
 #include <QMetaObject>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QStringList>
 #include <QSpinBox>
 #include <QTextEdit>
+#include <QToolButton>
 #include <QTime>
 #include <QTimer>
 #include <QVBoxLayout>
+#include <QWidget>
 
 #include <utility>
 
@@ -26,6 +29,7 @@ namespace {
     constexpr int kItemKindRole = Qt::UserRole;
     constexpr int kItemPeerRole = Qt::UserRole + 1;
     constexpr int kItemUserIdRole = Qt::UserRole + 2;
+    constexpr int kItemPreviewRole = Qt::UserRole + 3;
     constexpr int kChatItem = 1;
     constexpr int kUserSearchItem = 2;
     constexpr int kStatusItem = 3;
@@ -72,12 +76,12 @@ namespace {
 
     QString timePart(const QString& createdAt) {
         if (createdAt.isEmpty()) {
-            return QDateTime::currentDateTime().toString("HH:mm");
+            return QDateTime::currentDateTime().toString("yyyy-MM-dd HH:mm");
         }
 
         const QDateTime parsed = QDateTime::fromString(createdAt, "yyyy-MM-dd HH:mm:ss");
         if (parsed.isValid()) {
-            return parsed.toString("HH:mm");
+            return parsed.toString("yyyy-MM-dd HH:mm");
         }
 
         return createdAt;
@@ -142,9 +146,12 @@ void MainWindow::buildUi() {
     sidebarLayout->addWidget(chatStatusLabel_);
 
     auto* bottomNav = new QHBoxLayout();
+    profileLabel_ = new QLabel("Not signed in", sidebar);
+    profileLabel_->setObjectName("accountStatus");
     accountButton_ = new QPushButton("Profile", sidebar);
     chatsButton_ = new QPushButton("Chats", sidebar);
     settingsButton_ = new QPushButton("Settings", sidebar);
+    sidebarLayout->addWidget(profileLabel_);
     bottomNav->addWidget(accountButton_);
     bottomNav->addWidget(chatsButton_);
     bottomNav->addWidget(settingsButton_);
@@ -161,10 +168,7 @@ void MainWindow::buildUi() {
     headerLayout->setContentsMargins(18, 14, 18, 14);
     chatTitleLabel_ = new QLabel("NexTalk", header);
     chatTitleLabel_->setObjectName("chatTitle");
-    profileLabel_ = new QLabel("Not signed in", header);
-    profileLabel_->setObjectName("muted");
     headerLayout->addWidget(chatTitleLabel_);
-    headerLayout->addWidget(profileLabel_);
 
     systemLog_ = new QTextEdit(content);
     systemLog_->setObjectName("systemLog");
@@ -208,11 +212,12 @@ void MainWindow::buildUi() {
         "#search { background: #243447; color: #edf4ff; border: 0; border-radius: 16px; padding: 10px 14px; }"
         "#addChatButton { background: #1fbf75; }"
         "#chatList { background: #172331; color: #edf4ff; border: 0; outline: 0; }"
-        "#chatList::item { padding: 12px 8px; border-bottom: 1px solid #243447; }"
+        "#chatList::item { border-bottom: 1px solid #243447; }"
         "#chatList::item:selected { background: #243447; border-radius: 8px; }"
         "#chatHeader { background: #ffffff; border-bottom: 1px solid #d9e0e8; }"
         "#chatTitle { font-size: 20px; font-weight: 700; }"
         "#muted { color: #8ca0b3; }"
+        "#accountStatus { color: #c8d6e4; padding: 6px 2px; }"
         "#systemLog { background: #f8fafc; color: #52677a; border: 0; border-bottom: 1px solid #d9e0e8; padding: 8px; }"
         "#transcript { background: #e7eef5; border: 0; padding: 16px; }"
         "#compose { background: #ffffff; border-top: 1px solid #d9e0e8; }"
@@ -414,6 +419,23 @@ void MainWindow::installConnectionCallbacks() {
             connection_->fetchChats();
         }, Qt::QueuedConnection);
     };
+    callbacks.onDeleteChatResult = [this](const std::string& status,
+                                          const std::string& text,
+                                          const std::string& peer) {
+        QMetaObject::invokeMethod(this, [this, status, text, peer] {
+            const QString qtStatus = QString::fromStdString(status);
+            const QString qtText = QString::fromStdString(text);
+            const QString qtPeer = QString::fromStdString(peer);
+            if (qtStatus != "ok") {
+                appendSystemMessage("Delete chat " + qtStatus + ": " + qtText);
+                return;
+            }
+
+            removeChatItem(qtPeer);
+            appendSystemMessage("Chat deleted");
+            connection_->fetchChats();
+        }, Qt::QueuedConnection);
+    };
     callbacks.onProtocolError = [this](const std::string& text) {
         QMetaObject::invokeMethod(this, [this, text] {
             appendSystemMessage("Protocol: " + QString::fromStdString(text));
@@ -551,16 +573,17 @@ void MainWindow::rememberPeer(const QString& peer) {
     }
 
     for (int index = 0; index < chatList_->count(); ++index) {
-        if (chatList_->item(index)->data(kItemPeerRole).toString() == normalizedPeer ||
-            chatList_->item(index)->text().section('\n', 0, 0).trimmed() == normalizedPeer) {
+        if (chatList_->item(index)->data(kItemPeerRole).toString() == normalizedPeer) {
             return;
         }
     }
 
-    auto* item = new QListWidgetItem(normalizedPeer + "\nNo messages yet");
+    auto* item = new QListWidgetItem();
     item->setData(kItemKindRole, kChatItem);
     item->setData(kItemPeerRole, normalizedPeer);
+    item->setData(kItemPreviewRole, "No messages yet");
     chatList_->addItem(item);
+    installChatItemWidget(item);
     filterChatList();
 }
 
@@ -570,26 +593,136 @@ void MainWindow::updateChatPreview(const client::ChatSummary& chat) {
     const QString lastSender = QString::fromStdString(chat.lastSender);
     const QString lastText = QString::fromStdString(chat.lastText);
     const QString preview = lastText.isEmpty() ? "No messages yet" : (lastSender + ": " + lastText);
-    const QString label = peer + "\n" + preview;
 
     for (int index = 0; index < chatList_->count(); ++index) {
-        if (chatList_->item(index)->data(kItemPeerRole).toString() == peer ||
-            chatList_->item(index)->text().section('\n', 0, 0).trimmed() == peer) {
-            chatList_->item(index)->setText(label);
+        if (chatList_->item(index)->data(kItemPeerRole).toString() == peer) {
+            chatList_->item(index)->setText("");
             chatList_->item(index)->setData(kItemKindRole, kChatItem);
             chatList_->item(index)->setData(kItemPeerRole, peer);
             chatList_->item(index)->setData(kItemUserIdRole, peerId);
+            chatList_->item(index)->setData(kItemPreviewRole, preview);
+            installChatItemWidget(chatList_->item(index));
             filterChatList();
             return;
         }
     }
 
-    auto* item = new QListWidgetItem(label);
+    auto* item = new QListWidgetItem();
     item->setData(kItemKindRole, kChatItem);
     item->setData(kItemPeerRole, peer);
     item->setData(kItemUserIdRole, peerId);
+    item->setData(kItemPreviewRole, preview);
     chatList_->addItem(item);
+    installChatItemWidget(item);
     filterChatList();
+}
+
+void MainWindow::installChatItemWidget(QListWidgetItem* item) {
+    if (!item || item->data(kItemKindRole).toInt() != kChatItem) {
+        return;
+    }
+
+    if (auto* oldWidget = chatList_->itemWidget(item)) {
+        chatList_->removeItemWidget(item);
+        oldWidget->deleteLater();
+    }
+
+    const QString peer = item->data(kItemPeerRole).toString();
+    QString preview = item->data(kItemPreviewRole).toString().trimmed().isEmpty()
+        ? "No messages yet"
+        : item->data(kItemPreviewRole).toString().trimmed();
+    if (preview.size() > 42) {
+        preview = preview.left(39) + "...";
+    }
+
+    auto* row = new QWidget(chatList_);
+    row->setObjectName("chatRow");
+    row->setMinimumHeight(72);
+    auto* layout = new QHBoxLayout(row);
+    layout->setContentsMargins(10, 9, 8, 9);
+    layout->setSpacing(8);
+
+    auto* textBlock = new QWidget(row);
+    textBlock->setMinimumWidth(0);
+    auto* textLayout = new QVBoxLayout(textBlock);
+    textLayout->setContentsMargins(0, 0, 0, 0);
+    textLayout->setSpacing(5);
+
+    auto* nameLabel = new QLabel(peer, textBlock);
+    nameLabel->setStyleSheet("color:#edf4ff;font-weight:700;");
+    auto* previewLabel = new QLabel(preview, textBlock);
+    previewLabel->setStyleSheet("color:#9fb3c8;");
+    previewLabel->setWordWrap(false);
+    previewLabel->setMinimumWidth(0);
+    previewLabel->setTextInteractionFlags(Qt::NoTextInteraction);
+
+    textLayout->addWidget(nameLabel);
+    textLayout->addWidget(previewLabel);
+
+    auto* deleteButton = new QToolButton(row);
+    deleteButton->setText("x");
+    deleteButton->setToolTip("Delete chat");
+    deleteButton->setCursor(Qt::PointingHandCursor);
+    deleteButton->setFixedSize(24, 24);
+    deleteButton->setStyleSheet(
+        "QToolButton { border:0;border-radius:12px;background:#2b3d51;color:#c8d6e4;font-weight:700; }"
+        "QToolButton:hover { background:#ef4444;color:white; }"
+    );
+
+    layout->addWidget(textBlock, 1);
+    layout->addWidget(deleteButton, 0, Qt::AlignTop);
+
+    connect(deleteButton, &QToolButton::clicked, this, [this, peer] {
+        confirmDeleteChat(peer);
+    });
+
+    item->setSizeHint(QSize(chatList_->viewport()->width(), 72));
+    chatList_->setItemWidget(item, row);
+}
+
+void MainWindow::confirmDeleteChat(const QString& peer) {
+    if (!connected_ || peer.trimmed().isEmpty()) {
+        return;
+    }
+
+    QMessageBox confirm(this);
+    confirm.setWindowTitle("Delete chat");
+    confirm.setText("Delete chat with " + peer + "?");
+    confirm.setInformativeText("The chat history will be removed from the server.");
+    confirm.setStandardButtons(QMessageBox::Cancel | QMessageBox::Yes);
+    confirm.button(QMessageBox::Yes)->setText("Delete");
+    confirm.setDefaultButton(QMessageBox::Cancel);
+
+    if (confirm.exec() != QMessageBox::Yes) {
+        return;
+    }
+
+    connection_->deleteChat(peer.toStdString());
+}
+
+void MainWindow::removeChatItem(const QString& peer) {
+    for (int index = 0; index < chatList_->count(); ++index) {
+        auto* item = chatList_->item(index);
+        if (item->data(kItemPeerRole).toString() != peer) {
+            continue;
+        }
+
+        delete chatList_->takeItem(index);
+        break;
+    }
+
+    if (selectedPeer_ == peer) {
+        selectedPeer_.clear();
+        selectedPeerId_.clear();
+        transcript_->clear();
+        chatTitleLabel_->setText("NexTalk");
+        if (auto* next = firstVisibleChatItem()) {
+            chatList_->setCurrentItem(next);
+            selectPeer(next->data(kItemPeerRole).toString());
+        }
+    }
+
+    updateChatActions();
 }
 
 void MainWindow::filterChatList() {
@@ -602,7 +735,7 @@ void MainWindow::filterChatList() {
 
         const bool matches = query.isEmpty() ||
             item->data(kItemPeerRole).toString().contains(query, Qt::CaseInsensitive) ||
-            item->text().contains(query, Qt::CaseInsensitive);
+            item->data(kItemPreviewRole).toString().contains(query, Qt::CaseInsensitive);
         item->setHidden(!matches);
     }
 }
@@ -844,21 +977,22 @@ QString MainWindow::renderMessageHtml(const QString& sender,
     const QString safeTime = htmlText(timePart(createdAt));
 
     return QString(
-        "<table width='100%' cellspacing='0' cellpadding='0' style='margin:8px 0;'>"
+        "<table width='100%' cellspacing='0' cellpadding='0' style='margin:10px 0;'>"
         "<tr>"
-        "<td width='44' valign='top'>"
-        "<div style='width:34px;height:34px;border-radius:17px;background:%1;color:white;"
-        "font-weight:700;text-align:center;line-height:34px;'>%2</div>"
+        "<td width='54' valign='top'>"
+        "<div style='width:42px;height:42px;border-radius:21px;background:%1;color:white;"
+        "font-weight:700;text-align:center;line-height:42px;font-size:16px;'>%2</div>"
         "</td>"
         "<td valign='top'>"
-        "<div style='background:white;border-radius:10px;padding:8px 10px;'>"
+        "<div style='background:white;border-radius:16px;padding:10px 14px;'>"
         "<table width='100%' cellspacing='0' cellpadding='0'>"
         "<tr>"
-        "<td style='font-weight:700;color:#172331;'>%3</td>"
+        "<td style='font-weight:700;color:#172331;font-size:14px;padding-bottom:6px;'>%3</td>"
         "<td align='right' style='color:#7b8da1;font-size:12px;'>%4</td>"
         "</tr>"
         "</table>"
-        "<div style='color:#172331;margin-top:4px;'>%5</div>"
+        "<div style='color:#172331;text-align:left;font-size:15px;line-height:1.35;"
+        "padding:4px 8px 2px 8px;'>%5</div>"
         "</div>"
         "</td>"
         "</tr>"

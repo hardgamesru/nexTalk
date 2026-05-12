@@ -38,6 +38,9 @@ private:
     void selectPeer(const QString& peer);
     void rememberPeer(const QString& peer);
     void updateChatPreview(const client::ChatSummary& chat);
+    void installChatItemWidget(QListWidgetItem* item);
+    void confirmDeleteChat(const QString& peer);
+    void removeChatItem(const QString& peer);
     void filterChatList();
     QListWidgetItem* firstVisibleChatItem() const;
     void openAddChatDialog();

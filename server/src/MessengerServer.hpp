@@ -121,6 +121,12 @@ private:
                           const common::ProtocolMessage& message);
 
     /**
+     * Удаляет личный диалог и его историю.
+     */
+    void handleDeleteChat(const std::shared_ptr<ClientSession>& session,
+                          const common::ProtocolMessage& message);
+
+    /**
      * Удаляет сессию из таблицы онлайн-пользователей и закрывает ее сокет.
      */
     void removeSession(const std::shared_ptr<ClientSession>& session);

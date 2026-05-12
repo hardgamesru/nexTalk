@@ -30,6 +30,8 @@ namespace common {
         UserSearchResult,
         CreateChat,
         CreateChatResult,
+        DeleteChat,
+        DeleteChatResult,
         Info,
         Error,
         Quit,

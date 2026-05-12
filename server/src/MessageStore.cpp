@@ -530,6 +530,74 @@ bool MessageStore::fetchHistory(const std::string& user,
     }
 }
 
+bool MessageStore::deleteConversation(const std::string& user,
+                                      const std::string& peer,
+                                      std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    bool userKnown = false;
+    bool peerKnown = false;
+    if (!userExistsLocked(user, userKnown, error) ||
+        !userExistsLocked(peer, peerKnown, error)) {
+        return false;
+    }
+
+    if (!userKnown || !peerKnown) {
+        error = "unknown user";
+        return false;
+    }
+
+    long long conversationId = 0;
+    if (!findConversationLocked(user, peer, conversationId, error)) {
+        return false;
+    }
+
+    if (conversationId == 0) {
+        error = "chat not found";
+        return false;
+    }
+
+    if (!executeLocked("BEGIN IMMEDIATE TRANSACTION;", error)) {
+        return false;
+    }
+
+    {
+        Statement deleteMessages(db_,
+                                 "DELETE FROM messages WHERE conversation_id = ?;",
+                                 error);
+        if (!deleteMessages) {
+            executeLocked("ROLLBACK;", error);
+            return false;
+        }
+
+        sqlite3_bind_int64(deleteMessages.get(), 1, conversationId);
+        if (sqlite3_step(deleteMessages.get()) != SQLITE_DONE) {
+            error = lastError(db_);
+            executeLocked("ROLLBACK;", error);
+            return false;
+        }
+    }
+
+    {
+        Statement deleteConversation(db_,
+                                     "DELETE FROM conversations WHERE id = ?;",
+                                     error);
+        if (!deleteConversation) {
+            executeLocked("ROLLBACK;", error);
+            return false;
+        }
+
+        sqlite3_bind_int64(deleteConversation.get(), 1, conversationId);
+        if (sqlite3_step(deleteConversation.get()) != SQLITE_DONE) {
+            error = lastError(db_);
+            executeLocked("ROLLBACK;", error);
+            return false;
+        }
+    }
+
+    return executeLocked("COMMIT;", error);
+}
+
 bool MessageStore::executeLocked(const char* sql, std::string& error) {
     char* rawError = nullptr;
     const int result = sqlite3_exec(db_, sql, nullptr, nullptr, &rawError);

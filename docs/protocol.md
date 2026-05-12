@@ -99,6 +99,18 @@ create_chat<TAB>2
 
 1. id собеседника из `user_search_item`.
 
+### delete_chat
+
+```text
+delete_chat<TAB>bob
+```
+
+Удаляет личный диалог с выбранным пользователем вместе с историей сообщений.
+
+Поля:
+
+1. username собеседника.
+
 ### quit
 
 ```text
@@ -254,6 +266,20 @@ create_chat_result<TAB>ok<TAB>2<TAB>bob
 1. статус: `ok` или `error`;
 2. при `ok` - id собеседника, при `error` - описание ошибки;
 3. при `ok` - username собеседника.
+
+### delete_chat_result
+
+```text
+delete_chat_result<TAB>ok<TAB>deleted<TAB>bob
+```
+
+Завершает ответ на `delete_chat`.
+
+Поля:
+
+1. статус: `ok` или `error`;
+2. описание результата или ошибки;
+3. username удаленного собеседника, если сервер смог его определить.
 
 ## Пример обмена
 

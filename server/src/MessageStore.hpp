@@ -79,6 +79,9 @@ public:
                             long long peerId,
                             std::string& peerUsername,
                             std::string& error);
+    bool deleteConversation(const std::string& user,
+                            const std::string& peer,
+                            std::string& error);
 
 private:
     bool executeLocked(const char* sql, std::string& error);

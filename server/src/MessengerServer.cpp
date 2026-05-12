@@ -416,6 +416,9 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::CreateChat:
             handleCreateChat(session, message);
             break;
+        case common::CommandType::DeleteChat:
+            handleDeleteChat(session, message);
+            break;
         case common::CommandType::Quit:
             sendToSession(session, {common::CommandType::Info, {"bye"}});
             session->active = false;
@@ -711,6 +714,33 @@ void MessengerServer::handleCreateChat(const std::shared_ptr<ClientSession>& ses
     sendToSession(session, {common::CommandType::CreateChatResult, {"ok", message.fields[0], peer}});
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
     logEvent("chat_created user=" + session->username + " peer=" + peer);
+}
+
+void MessengerServer::handleDeleteChat(const std::shared_ptr<ClientSession>& session,
+                                       const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
+        sendToSession(session, {common::CommandType::DeleteChatResult, {"error", "invalid chat"}});
+        return;
+    }
+
+    const std::string peer = message.fields[0];
+    std::string storageError;
+    if (!messageStore_.deleteConversation(session->username, peer, storageError)) {
+        logEvent("chat_delete_failed user=" + session->username +
+                 " peer=" + peer +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::DeleteChatResult, {"error", storageError, peer}});
+        return;
+    }
+
+    logEvent("chat_deleted user=" + session->username + " peer=" + peer);
+    sendToSession(session, {common::CommandType::DeleteChatResult, {"ok", "deleted", peer}});
+    handleFetchChats(session, {common::CommandType::FetchChats, {}});
 }
 
 void MessengerServer::removeSession(const std::shared_ptr<ClientSession>& session) {

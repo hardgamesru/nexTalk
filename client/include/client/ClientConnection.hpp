@@ -56,6 +56,9 @@ public:
         std::function<void(const std::string& status,
                            const std::string& peerId,
                            const std::string& text)> onCreateChatResult;
+        std::function<void(const std::string& status,
+                           const std::string& text,
+                           const std::string& peer)> onDeleteChatResult;
         std::function<void(const std::string& text)> onProtocolError;
         std::function<void()> onDisconnected;
     };
@@ -79,6 +82,7 @@ public:
     bool fetchChats();
     bool searchUsers(const std::string& query);
     bool createChat(const std::string& peerId);
+    bool deleteChat(const std::string& peer);
     bool quit();
 
 private:

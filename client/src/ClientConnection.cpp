@@ -141,6 +141,10 @@ bool ClientConnection::createChat(const std::string& peerId) {
     return sendMessage({common::CommandType::CreateChat, {peerId}});
 }
 
+bool ClientConnection::deleteChat(const std::string& peer) {
+    return sendMessage({common::CommandType::DeleteChat, {peer}});
+}
+
 bool ClientConnection::quit() {
     return sendMessage({common::CommandType::Quit, {}});
 }
@@ -297,6 +301,12 @@ void ClientConnection::handleServerMessage(const common::ProtocolMessage& messag
             const std::string peerId = message.fields.size() >= 3 ? message.fields[1] : "";
             const std::string text = message.fields.size() >= 3 ? message.fields[2] : message.fields[1];
             callbacks.onCreateChatResult(message.fields[0], peerId, text);
+        }
+        break;
+    case common::CommandType::DeleteChatResult:
+        if (message.fields.size() >= 2 && callbacks.onDeleteChatResult) {
+            const std::string peer = message.fields.size() >= 3 ? message.fields[2] : "";
+            callbacks.onDeleteChatResult(message.fields[0], message.fields[1], peer);
         }
         break;
     case common::CommandType::Error:
