@@ -404,6 +404,9 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::SendMessage:
             handleSendMessage(session, message);
             break;
+        case common::CommandType::ForwardMessage:
+            handleForwardMessage(session, message);
+            break;
         case common::CommandType::FetchHistory:
             handleFetchHistory(session, message);
             break;
@@ -569,6 +572,7 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
                                    recipientName,
                                    text,
                                    replyToMessageId,
+                                   0,
                                    storedMessage,
                                    storageError)) {
         logEvent("message_store_failed from=" + session->username +
@@ -586,7 +590,10 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         storedMessage.text,
         storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
         storedMessage.replyToSender,
-        storedMessage.replyToText
+        storedMessage.replyToText,
+        storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+        storedMessage.forwardFromSender,
+        storedMessage.forwardFromText
     };
 
     sendToSession(session, {common::CommandType::SendMessageResult,
@@ -598,7 +605,10 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
                              storedMessage.text,
                              storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
                              storedMessage.replyToSender,
-                             storedMessage.replyToText}});
+                             storedMessage.replyToText,
+                             storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+                             storedMessage.forwardFromSender,
+                             storedMessage.forwardFromText}});
 
     if (!recipient) {
         sendToSession(session, {common::CommandType::Info, {"saved for offline user " + recipientName}});
@@ -615,6 +625,115 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
 
     sendToSession(session, {common::CommandType::Info, {"delivered to " + recipientName}});
     logEvent("message_delivered from=" + session->username + " to=" + recipientName);
+    handleFetchChats(session, {common::CommandType::FetchChats, {}});
+    handleFetchChats(recipient, {common::CommandType::FetchChats, {}});
+}
+
+void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>& session,
+                                           const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    if ((message.fields.size() != 2 && message.fields.size() != 3) || !isValidUsername(message.fields[0])) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "usage: /forward <user> <message_id>"}});
+        return;
+    }
+
+    long long sourceMessageId = 0;
+    if (!parsePositiveInt64(message.fields[1], sourceMessageId)) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "invalid forward target"}});
+        return;
+    }
+
+    StoredMessage sourceMessage;
+    std::string storageError;
+    if (!messageStore_.loadAccessibleMessage(session->username, sourceMessageId, sourceMessage, storageError)) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError.empty() ? "cannot load source message" : storageError}});
+        return;
+    }
+
+    if (sourceMessage.id == 0) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "forward target not found"}});
+        return;
+    }
+
+    const std::string recipientName = message.fields[0];
+    if (recipientName == session->username) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "cannot forward messages to yourself"}});
+        return;
+    }
+
+    const std::string commentText = message.fields.size() == 3 ? message.fields[2] : "";
+    std::shared_ptr<ClientSession> recipient;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        const auto it = onlineUsers_.find(recipientName);
+        if (it != onlineUsers_.end()) {
+            recipient = it->second;
+        }
+    }
+
+    logEvent("message_forwarded from=" + session->username +
+             " to=" + recipientName +
+             " source_id=" + std::to_string(sourceMessageId));
+
+    StoredMessage storedMessage;
+    if (!messageStore_.saveMessage(session->username,
+                                   recipientName,
+                                   commentText,
+                                   0,
+                                   sourceMessage.id,
+                                   storedMessage,
+                                   storageError)) {
+        logEvent("forward_store_failed from=" + session->username +
+                 " to=" + recipientName +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError}});
+        return;
+    }
+
+    const std::vector<std::string> messageFields = {
+        std::to_string(storedMessage.id),
+        storedMessage.createdAt,
+        storedMessage.sender,
+        storedMessage.recipient,
+        storedMessage.text,
+        storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
+        storedMessage.replyToSender,
+        storedMessage.replyToText,
+        storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+        storedMessage.forwardFromSender,
+        storedMessage.forwardFromText
+    };
+
+    sendToSession(session, {common::CommandType::SendMessageResult,
+                            {"ok",
+                             std::to_string(storedMessage.id),
+                             storedMessage.createdAt,
+                             storedMessage.sender,
+                             storedMessage.recipient,
+                             storedMessage.text,
+                             "",
+                             "",
+                             "",
+                             storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+                             storedMessage.forwardFromSender,
+                             storedMessage.forwardFromText}});
+
+    if (!recipient) {
+        sendToSession(session, {common::CommandType::Info, {"forwarded message saved for offline user " + recipientName}});
+        handleFetchChats(session, {common::CommandType::FetchChats, {}});
+        return;
+    }
+
+    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, messageFields})) {
+        sendToSession(session, {common::CommandType::Info, {"forward saved; delivery will be available in history"}});
+        return;
+    }
+
+    sendToSession(session, {common::CommandType::Info, {"forwarded to " + recipientName}});
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
     handleFetchChats(recipient, {common::CommandType::FetchChats, {}});
 }
@@ -662,7 +781,10 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
                                  item.text,
                                  item.replyToMessageId > 0 ? std::to_string(item.replyToMessageId) : "",
                                  item.replyToSender,
-                                 item.replyToText}});
+                                 item.replyToText,
+                                 item.forwardFromMessageId > 0 ? std::to_string(item.forwardFromMessageId) : "",
+                                 item.forwardFromSender,
+                                 item.forwardFromText}});
     }
 
     sendToSession(session, {common::CommandType::HistoryResult,

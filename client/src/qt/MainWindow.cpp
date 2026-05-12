@@ -973,8 +973,10 @@ void MainWindow::appendChatMessage(const QString& sender,
                                    const QString& text,
                                    const QString& createdAt,
                                    const QString& replySender,
-                                   const QString& replyText) {
-    transcript_->append(renderMessageHtml(sender, text, createdAt, replySender, replyText));
+                                   const QString& replyText,
+                                   const QString& forwardSender,
+                                   const QString& forwardText) {
+    transcript_->append(renderMessageHtml(sender, text, createdAt, replySender, replyText, forwardSender, forwardText));
 }
 
 void MainWindow::appendHistoryMessage(const client::HistoryItem& item) {
@@ -982,14 +984,18 @@ void MainWindow::appendHistoryMessage(const client::HistoryItem& item) {
                       QString::fromStdString(item.text),
                       QString::fromStdString(item.createdAt),
                       QString::fromStdString(item.replyToSender),
-                      QString::fromStdString(item.replyToText));
+                      QString::fromStdString(item.replyToText),
+                      QString::fromStdString(item.forwardFromSender),
+                      QString::fromStdString(item.forwardFromText));
 }
 
 QString MainWindow::renderMessageHtml(const QString& sender,
                                       const QString& text,
                                       const QString& createdAt,
                                       const QString& replySender,
-                                      const QString& replyText) const {
+                                      const QString& replyText,
+                                      const QString& forwardSender,
+                                      const QString& forwardText) const {
     const QString initial = sender.isEmpty() ? "?" : sender.left(1).toUpper();
     const QString color = avatarColor(sender);
     const QString safeSender = htmlText(sender);
@@ -997,6 +1003,8 @@ QString MainWindow::renderMessageHtml(const QString& sender,
     const QString safeTime = htmlText(timePart(createdAt));
     const QString safeReplySender = htmlText(replySender);
     const QString safeReplyText = htmlText(replyText);
+    const QString safeForwardSender = htmlText(forwardSender);
+    const QString safeForwardText = htmlText(forwardText);
     const QString replyBlock =
         replySender.isEmpty() && replyText.isEmpty()
             ? QString()
@@ -1007,6 +1015,16 @@ QString MainWindow::renderMessageHtml(const QString& sender,
                   "<div style='color:#5b6672;font-size:12px;line-height:1.3;'>%2</div>"
                   "</div>")
                   .arg(safeReplySender, safeReplyText);
+    const QString forwardBlock =
+        forwardSender.isEmpty() && forwardText.isEmpty()
+            ? QString()
+            : QString(
+                  "<div style='border-left:3px solid #9aa7b5;background:#f6f7f9;border-radius:10px;"
+                  "padding:8px 10px;margin:0 0 8px 0;'>"
+                  "<div style='font-weight:700;color:#41505f;font-size:12px;'>Forwarded from %1</div>"
+                  "<div style='color:#6a7682;font-size:12px;line-height:1.3;'>%2</div>"
+                  "</div>")
+                  .arg(safeForwardSender, safeForwardText);
 
     return QString(
         "<table width='100%' cellspacing='0' cellpadding='0' style='margin:10px 0;'>"
@@ -1024,13 +1042,14 @@ QString MainWindow::renderMessageHtml(const QString& sender,
         "</tr>"
         "</table>"
         "%6"
+        "%7"
         "<div style='color:#172331;text-align:left;font-size:15px;line-height:1.35;"
         "padding:4px 8px 2px 8px;'>%5</div>"
         "</div>"
         "</td>"
         "</tr>"
         "</table>"
-    ).arg(color, htmlText(initial), safeSender, safeTime, safeText, replyBlock);
+    ).arg(color, htmlText(initial), safeSender, safeTime, safeText, replyBlock, forwardBlock);
 }
 
 QString MainWindow::currentPeer() const {

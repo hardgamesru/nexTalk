@@ -57,13 +57,17 @@ private:
                            const QString& text,
                            const QString& createdAt = {},
                            const QString& replySender = {},
-                           const QString& replyText = {});
+                           const QString& replyText = {},
+                           const QString& forwardSender = {},
+                           const QString& forwardText = {});
     void appendHistoryMessage(const client::HistoryItem& item);
     QString renderMessageHtml(const QString& sender,
                               const QString& text,
                               const QString& createdAt,
                               const QString& replySender,
-                              const QString& replyText) const;
+                              const QString& replyText,
+                              const QString& forwardSender,
+                              const QString& forwardText) const;
     QString currentPeer() const;
     void setConnectedState(bool connected);
     void setConnectingState(bool connecting);

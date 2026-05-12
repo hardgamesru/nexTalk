@@ -315,7 +315,7 @@ bool MessageStore::saveMessage(const std::string& sender,
                                    "SELECT m.sender, m.body "
                                    "FROM messages m "
                                    "JOIN conversations c ON c.id = m.conversation_id "
-                                   "WHERE m.id = ? AND (c.user_a = ? OR c.user_b = ?);",
+                                   "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
                                    error);
         if (!forwardStatement) {
             return false;
@@ -421,7 +421,7 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
                         "JOIN conversations c ON c.id = m.conversation_id "
                         "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
                         "LEFT JOIN messages fwd ON fwd.id = m.forward_from_message_id "
-                        "WHERE m.id = ? AND (c.user_a = ? OR c.user_b = ?);",
+                        "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
                         error);
     if (!statement) {
         return false;

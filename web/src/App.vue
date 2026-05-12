@@ -24,6 +24,9 @@ type ChatMessage = {
   replyToMessageId: number | null;
   replyToSender: string;
   replyToText: string;
+  forwardFromMessageId: number | null;
+  forwardFromSender: string;
+  forwardFromText: string;
 };
 
 type SearchUser = {
@@ -76,6 +79,11 @@ const ui = reactive({
   contextMenuY: 0,
   contextMenuMessageId: 0,
   highlightedMessageId: 0,
+  forwardTarget: null as ChatMessage | null,
+  showForwardPicker: false,
+  forwardPreviewMessage: null as ChatMessage | null,
+  forwardRecipient: "",
+  forwardDraft: "",
 });
 
 const chats = ref<ChatItem[]>([]);
@@ -119,6 +127,10 @@ const profileInitial = computed(() => {
   return (session.currentUser || "?").slice(0, 1).toUpperCase();
 });
 
+const forwardableChats = computed(() => {
+  return chats.value.filter((chat) => chat.peer !== session.currentUser);
+});
+
 function pushLog(text: string) {
   const stamp = new Date().toLocaleString();
   ui.logs.push(`[${stamp}] ${text}`);
@@ -160,6 +172,8 @@ function parseChatMessage(fields: string[], offset = 0) {
 
   const replyToRaw = fields[offset + 5] ?? "";
   const replyToMessageId = replyToRaw ? Number.parseInt(replyToRaw, 10) : null;
+  const forwardFromRaw = fields[offset + 8] ?? "";
+  const forwardFromMessageId = forwardFromRaw ? Number.parseInt(forwardFromRaw, 10) : null;
 
   return {
     id,
@@ -170,6 +184,9 @@ function parseChatMessage(fields: string[], offset = 0) {
     replyToMessageId: replyToMessageId && Number.isFinite(replyToMessageId) ? replyToMessageId : null,
     replyToSender: fields[offset + 6] ?? "",
     replyToText: fields[offset + 7] ?? "",
+    forwardFromMessageId: forwardFromMessageId && Number.isFinite(forwardFromMessageId) ? forwardFromMessageId : null,
+    forwardFromSender: fields[offset + 9] ?? "",
+    forwardFromText: fields[offset + 10] ?? "",
   } as ChatMessage;
 }
 
@@ -260,6 +277,11 @@ function clearSessionData() {
   ui.contextMenuVisible = false;
   ui.contextMenuMessageId = 0;
   ui.highlightedMessageId = 0;
+  ui.forwardTarget = null;
+  ui.showForwardPicker = false;
+  ui.forwardPreviewMessage = null;
+  ui.forwardRecipient = "";
+  ui.forwardDraft = "";
   searchResults.value = [];
   Object.keys(chatIndex).forEach((key) => {
     delete chatIndex[key];
@@ -526,6 +548,59 @@ function cancelReply() {
   ui.replyTarget = null;
 }
 
+function beginForward() {
+  const message = currentMessages.value.find((item) => item.id === ui.contextMenuMessageId) ?? null;
+  if (message) {
+    ui.forwardTarget = message;
+    ui.showForwardPicker = true;
+    ui.forwardRecipient = "";
+    ui.forwardDraft = "";
+  }
+  closeContextMenu();
+}
+
+function cancelForward() {
+  ui.forwardTarget = null;
+  ui.showForwardPicker = false;
+  ui.forwardRecipient = "";
+  ui.forwardDraft = "";
+}
+
+function selectForwardPeer(peer: string) {
+  ui.forwardRecipient = peer;
+}
+
+function submitForward() {
+  const peer = ui.forwardRecipient.trim();
+  if (!ui.forwardTarget?.id) {
+    return;
+  }
+
+  if (!peer) {
+    return;
+  }
+
+  const fields = [peer, String(ui.forwardTarget.id)];
+  if (ui.forwardDraft.trim()) {
+    fields.push(ui.forwardDraft.trim());
+  }
+
+  sendCommand("forward_message", fields);
+  pushLog(`Forwarding message #${ui.forwardTarget.id} to ${peer}`);
+  cancelForward();
+}
+
+function openForwardPreview(message: ChatMessage) {
+  if (!message.forwardFromMessageId) {
+    return;
+  }
+  ui.forwardPreviewMessage = message;
+}
+
+function closeForwardPreview() {
+  ui.forwardPreviewMessage = null;
+}
+
 function jumpToMessage(messageId: number | null) {
   if (!messageId) {
     return;
@@ -567,6 +642,10 @@ function onLogsScroll() {
 }
 
 function signOut() {
+  if (!confirm("Sign out from the current account?")) {
+    return;
+  }
+
   session.profileMenuOpen = false;
   if (connection.tcpConnected) {
     sendCommand("quit");
@@ -794,7 +873,7 @@ watch(
       </div>
       <div v-if="session.profileMenuOpen" class="profile-menu">
         <strong>{{ session.currentUser }}</strong>
-        <button class="danger" @click="signOut">Sign out</button>
+        <button class="danger small signout-btn" @click="signOut">Sign out</button>
       </div>
 
       <section class="panel chats-panel">
@@ -813,7 +892,9 @@ watch(
           >
             <div class="chat-row-main">
               <strong>{{ chat.peer }}</strong>
-              <span class="preview">{{ chat.lastSender }} {{ chat.lastText }}</span>
+              <span class="preview">
+                {{ chat.lastText ? `${chat.lastSender}: ${chat.lastText}` : "No messages yet" }}
+              </span>
             </div>
             <div class="chat-row-actions">
               <span v-if="chat.unreadCount > 0 && session.selectedPeer !== chat.peer" class="unread-dot"></span>
@@ -845,7 +926,6 @@ watch(
 
       <section ref="messagesViewport" class="messages" @scroll="onMessagesScroll">
         <div v-if="!session.selectedPeer" class="empty-chat">
-          <h3>Привет</h3>
           <p>Выберите чат в списке слева, чтобы увидеть переписку.</p>
         </div>
         <template v-for="(message, idx) in currentMessages" :key="message.id || idx">
@@ -862,6 +942,15 @@ watch(
                 <small>{{ formatServerTime(message.createdAt) }}</small>
               </div>
               <button
+                v-if="message.forwardFromMessageId"
+                class="forward-snippet"
+                type="button"
+                @click="openForwardPreview(message)"
+              >
+                <strong>Forwarded from {{ message.forwardFromSender || "Unknown" }}</strong>
+                <span>{{ excerpt(message.forwardFromText || message.text) }}</span>
+              </button>
+              <button
                 v-if="message.replyToMessageId"
                 class="reply-snippet"
                 type="button"
@@ -870,7 +959,7 @@ watch(
                 <strong>{{ message.replyToSender || "Message" }}</strong>
                 <span>{{ excerpt(message.replyToText || "Deleted message") }}</span>
               </button>
-              <p>{{ message.text }}</p>
+              <p v-if="message.text">{{ message.text }}</p>
             </div>
           </article>
         </template>
@@ -881,6 +970,7 @@ watch(
           :style="{ left: `${ui.contextMenuX}px`, top: `${ui.contextMenuY}px` }"
         >
           <button class="message-menu-item" @click.stop="beginReply">Reply</button>
+          <button class="message-menu-item" @click.stop="beginForward">Forward</button>
         </div>
       </section>
 
@@ -918,6 +1008,7 @@ watch(
 
     <section v-if="ui.showAddChat" class="modal-wrap">
       <div class="modal">
+        <button class="modal-close" type="button" @click="closeAddChat" aria-label="Close">x</button>
         <h3>Create Chat</h3>
         <p>Find users by username and create a private chat.</p>
         <div class="modal-search">
@@ -938,8 +1029,56 @@ watch(
           </button>
           <p v-if="!ui.searchInFlight && searchResults.length === 0">No results</p>
         </div>
+      </div>
+    </section>
+
+    <section v-if="ui.showForwardPicker && ui.forwardTarget" class="modal-wrap" @click.self="cancelForward">
+      <div class="modal forward-modal">
+        <button class="modal-close" type="button" @click="cancelForward" aria-label="Close">x</button>
+        <h3>Forward message</h3>
+        <p>Choose who should receive this message and add an optional comment.</p>
+        <div class="forward-preview-card">
+          <strong>{{ ui.forwardTarget.sender }}</strong>
+          <span>{{ excerpt(ui.forwardTarget.text, 160) }}</span>
+        </div>
+        <div class="forward-section-title">Кому</div>
+        <div class="forward-chat-list">
+          <button
+            v-for="chat in forwardableChats"
+            :key="`forward-${chat.peer}`"
+            class="forward-chat-row"
+            :class="{ active: ui.forwardRecipient === chat.peer }"
+            @click="selectForwardPeer(chat.peer)"
+          >
+            <strong>{{ chat.peer }}</strong>
+            <span>{{ chat.lastText ? `${chat.lastSender}: ${chat.lastText}` : "No messages yet" }}</span>
+          </button>
+          <p v-if="forwardableChats.length === 0">Create another chat first, then forward messages there.</p>
+        </div>
+        <div class="forward-compose">
+          <label>Add a comment</label>
+          <textarea
+            v-model="ui.forwardDraft"
+            rows="3"
+            placeholder="Optional text"
+          ></textarea>
+        </div>
         <div class="modal-actions">
-          <button class="small" @click="closeAddChat">Close</button>
+          <button class="primary" @click="submitForward" :disabled="!ui.forwardRecipient">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="ui.forwardPreviewMessage" class="modal-wrap" @click.self="closeForwardPreview">
+      <div class="modal forward-view-modal">
+        <h3>Forwarded message</h3>
+        <p>This is the original content preserved inside the forwarded message.</p>
+        <div class="forward-view-card">
+          <strong>{{ ui.forwardPreviewMessage.forwardFromSender || "Unknown" }}</strong>
+          <span>{{ ui.forwardPreviewMessage.forwardFromText || ui.forwardPreviewMessage.text }}</span>
+        </div>
+        <div class="modal-actions">
+          <button class="small" @click="closeForwardPreview">Close</button>
         </div>
       </div>
     </section>

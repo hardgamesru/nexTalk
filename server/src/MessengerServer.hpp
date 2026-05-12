@@ -96,6 +96,12 @@ private:
                            const common::ProtocolMessage& message);
 
     /**
+     * Пересылает уже существующее сообщение в другой личный диалог.
+     */
+    void handleForwardMessage(const std::shared_ptr<ClientSession>& session,
+                              const common::ProtocolMessage& message);
+
+    /**
      * Обрабатывает команду fetch_history и отправляет клиенту последние
      * сообщения из SQLite.
      */
