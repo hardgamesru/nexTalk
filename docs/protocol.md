@@ -310,7 +310,7 @@ mark_read_result<TAB>ok<TAB>bob
 ## Пример обмена
 
 ```text
-C -> S: login<TAB>alice
+C -> S: login<TAB>alice<TAB>password
 S -> C: login_result<TAB>ok<TAB>logged in as alice
 C -> S: send_message<TAB>bob<TAB>Привет
 S -> bob: incoming_message<TAB>alice<TAB>Привет
