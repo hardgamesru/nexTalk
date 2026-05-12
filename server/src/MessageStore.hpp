@@ -18,6 +18,9 @@ struct StoredMessage {
     long long replyToMessageId{0};
     std::string replyToSender;
     std::string replyToText;
+    long long forwardFromMessageId{0};
+    std::string forwardFromSender;
+    std::string forwardFromText;
 };
 
 struct ChatSummary {
@@ -67,8 +70,13 @@ public:
                      const std::string& recipient,
                      const std::string& text,
                      long long replyToMessageId,
+                     long long forwardFromMessageId,
                      StoredMessage& storedMessage,
                      std::string& error);
+    bool loadAccessibleMessage(const std::string& username,
+                               long long messageId,
+                               StoredMessage& message,
+                               std::string& error);
     bool fetchHistory(const std::string& user,
                       const std::string& peer,
                       int limit,

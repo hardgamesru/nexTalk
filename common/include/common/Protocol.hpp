@@ -18,6 +18,7 @@ namespace common {
         Login,
         LoginResult,
         SendMessage,
+        ForwardMessage,
         SendMessageResult,
         IncomingMessage,
         FetchHistory,

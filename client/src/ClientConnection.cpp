@@ -127,6 +127,11 @@ bool ClientConnection::sendPrivateMessage(const std::string& recipient,
     return sendMessage({common::CommandType::SendMessage, {recipient, text, replyToMessageId}});
 }
 
+bool ClientConnection::forwardMessage(const std::string& recipient,
+                                      const std::string& sourceMessageId) {
+    return sendMessage({common::CommandType::ForwardMessage, {recipient, sourceMessageId}});
+}
+
 bool ClientConnection::fetchHistory(const std::string& peer, const std::string& limit) {
     if (limit.empty()) {
         return sendMessage({common::CommandType::FetchHistory, {peer}});
@@ -272,6 +277,22 @@ void ClientConnection::handleServerMessage(const common::ProtocolMessage& messag
 
         if (fields.size() >= offset + 8) {
             item.replyToText = fields[offset + 7];
+        }
+
+        if (fields.size() >= offset + 9 && !fields[offset + 8].empty()) {
+            try {
+                item.forwardFromMessageId = std::stoll(fields[offset + 8]);
+            } catch (...) {
+                return false;
+            }
+        }
+
+        if (fields.size() >= offset + 10) {
+            item.forwardFromSender = fields[offset + 9];
+        }
+
+        if (fields.size() >= offset + 11) {
+            item.forwardFromText = fields[offset + 10];
         }
 
         return true;

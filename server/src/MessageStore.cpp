@@ -253,6 +253,7 @@ bool MessageStore::saveMessage(const std::string& sender,
                                const std::string& recipient,
                                const std::string& text,
                                long long replyToMessageId,
+                               long long forwardFromMessageId,
                                StoredMessage& storedMessage,
                                std::string& error) {
     storedMessage = StoredMessage{};
@@ -307,14 +308,49 @@ bool MessageStore::saveMessage(const std::string& sender,
         replyToText = rawReplyText ? reinterpret_cast<const char*>(rawReplyText) : "";
     }
 
+    std::string forwardFromSender;
+    std::string forwardFromText;
+    if (forwardFromMessageId > 0) {
+        Statement forwardStatement(db_,
+                                   "SELECT m.sender, m.body "
+                                   "FROM messages m "
+                                   "JOIN conversations c ON c.id = m.conversation_id "
+                                   "WHERE m.id = ? AND (c.user_a = ? OR c.user_b = ?);",
+                                   error);
+        if (!forwardStatement) {
+            return false;
+        }
+
+        sqlite3_bind_int64(forwardStatement.get(), 1, forwardFromMessageId);
+        sqlite3_bind_text(forwardStatement.get(), 2, sender.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(forwardStatement.get(), 3, sender.c_str(), -1, SQLITE_TRANSIENT);
+
+        const int forwardResult = sqlite3_step(forwardStatement.get());
+        if (forwardResult == SQLITE_DONE) {
+            error = "forward target not found";
+            return false;
+        }
+
+        if (forwardResult != SQLITE_ROW) {
+            error = lastError(db_);
+            return false;
+        }
+
+        const auto* rawForwardSender = sqlite3_column_text(forwardStatement.get(), 0);
+        const auto* rawForwardText = sqlite3_column_text(forwardStatement.get(), 1);
+        forwardFromSender = rawForwardSender ? reinterpret_cast<const char*>(rawForwardSender) : "";
+        forwardFromText = rawForwardText ? reinterpret_cast<const char*>(rawForwardText) : "";
+    }
+
     Statement statement(db_,
                         "INSERT INTO messages("
                         "  conversation_id,"
                         "  sender,"
                         "  recipient,"
                         "  body,"
-                        "  reply_to_message_id"
-                        ") VALUES (?, ?, ?, ?, NULLIF(?, 0));",
+                        "  reply_to_message_id,"
+                        "  forward_from_message_id"
+                        ") VALUES (?, ?, ?, ?, NULLIF(?, 0), NULLIF(?, 0));",
                         error);
     if (!statement) {
         return false;
@@ -325,6 +361,7 @@ bool MessageStore::saveMessage(const std::string& sender,
     sqlite3_bind_text(statement.get(), 3, recipient.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(statement.get(), 4, text.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(statement.get(), 5, replyToMessageId);
+    sqlite3_bind_int64(statement.get(), 6, forwardFromMessageId);
 
     const int result = sqlite3_step(statement.get());
     if (result != SQLITE_DONE) {
@@ -339,6 +376,9 @@ bool MessageStore::saveMessage(const std::string& sender,
     storedMessage.replyToMessageId = replyToMessageId;
     storedMessage.replyToSender = replyToSender;
     storedMessage.replyToText = replyToText;
+    storedMessage.forwardFromMessageId = forwardFromMessageId;
+    storedMessage.forwardFromSender = forwardFromSender;
+    storedMessage.forwardFromText = forwardFromText;
 
     Statement createdAtStatement(db_,
                                  "SELECT created_at FROM messages WHERE id = ?;",
@@ -359,6 +399,64 @@ bool MessageStore::saveMessage(const std::string& sender,
         storedMessage.createdAt = reinterpret_cast<const char*>(rawCreatedAt);
     }
 
+    return true;
+}
+
+bool MessageStore::loadAccessibleMessage(const std::string& username,
+                                         long long messageId,
+                                         StoredMessage& message,
+                                         std::string& error) {
+    message = StoredMessage{};
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    Statement statement(db_,
+                        "SELECT m.id, m.created_at, m.sender, m.recipient, m.body, "
+                        "       COALESCE(m.reply_to_message_id, 0), "
+                        "       COALESCE(reply.sender, ''), "
+                        "       COALESCE(reply.body, ''), "
+                        "       COALESCE(m.forward_from_message_id, 0), "
+                        "       COALESCE(fwd.sender, ''), "
+                        "       COALESCE(fwd.body, '') "
+                        "FROM messages m "
+                        "JOIN conversations c ON c.id = m.conversation_id "
+                        "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
+                        "LEFT JOIN messages fwd ON fwd.id = m.forward_from_message_id "
+                        "WHERE m.id = ? AND (c.user_a = ? OR c.user_b = ?);",
+                        error);
+    if (!statement) {
+        return false;
+    }
+
+    sqlite3_bind_int64(statement.get(), 1, messageId);
+    sqlite3_bind_text(statement.get(), 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 3, username.c_str(), -1, SQLITE_TRANSIENT);
+
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) {
+        return true;
+    }
+
+    if (result != SQLITE_ROW) {
+        error = lastError(db_);
+        return false;
+    }
+
+    auto columnText = [&](int column) -> std::string {
+        const auto* value = sqlite3_column_text(statement.get(), column);
+        return value ? reinterpret_cast<const char*>(value) : "";
+    };
+
+    message.id = sqlite3_column_int64(statement.get(), 0);
+    message.createdAt = columnText(1);
+    message.sender = columnText(2);
+    message.recipient = columnText(3);
+    message.text = columnText(4);
+    message.replyToMessageId = sqlite3_column_int64(statement.get(), 5);
+    message.replyToSender = columnText(6);
+    message.replyToText = columnText(7);
+    message.forwardFromMessageId = sqlite3_column_int64(statement.get(), 8);
+    message.forwardFromSender = columnText(9);
+    message.forwardFromText = columnText(10);
     return true;
 }
 
@@ -576,15 +674,19 @@ bool MessageStore::fetchHistory(const std::string& user,
                         "  m.body,"
                         "  COALESCE(m.reply_to_message_id, 0),"
                         "  COALESCE(reply.sender, ''),"
-                        "  COALESCE(reply.body, '') "
+                        "  COALESCE(reply.body, ''),"
+                        "  COALESCE(m.forward_from_message_id, 0),"
+                        "  COALESCE(fwd.sender, ''),"
+                        "  COALESCE(fwd.body, '') "
                         "FROM ("
-                        "  SELECT id, created_at, sender, recipient, body, reply_to_message_id "
+                        "  SELECT id, created_at, sender, recipient, body, reply_to_message_id, forward_from_message_id "
                         "  FROM messages "
                         "  WHERE conversation_id = ? "
                         "  ORDER BY id DESC "
                         "  LIMIT ?"
                         ") m "
                         "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
+                        "LEFT JOIN messages fwd ON fwd.id = m.forward_from_message_id "
                         "ORDER BY m.id ASC;",
                         error);
     if (!statement) {
@@ -618,7 +720,10 @@ bool MessageStore::fetchHistory(const std::string& user,
             columnText(4),
             sqlite3_column_int64(statement.get(), 5),
             columnText(6),
-            columnText(7)
+            columnText(7),
+            sqlite3_column_int64(statement.get(), 8),
+            columnText(9),
+            columnText(10)
         });
     }
 }
@@ -796,6 +901,7 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
         "  recipient TEXT NOT NULL,"
         "  body TEXT NOT NULL,"
         "  reply_to_message_id INTEGER,"
+        "  forward_from_message_id INTEGER,"
         "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
         ");"
@@ -817,7 +923,8 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
 
     return ensureColumnLocked("users", "password_salt", "TEXT", error) &&
            ensureColumnLocked("users", "password_hash", "TEXT", error) &&
-           ensureColumnLocked("messages", "reply_to_message_id", "INTEGER", error);
+           ensureColumnLocked("messages", "reply_to_message_id", "INTEGER", error) &&
+           ensureColumnLocked("messages", "forward_from_message_id", "INTEGER", error);
 }
 
 bool MessageStore::ensureColumnLocked(const std::string& table,

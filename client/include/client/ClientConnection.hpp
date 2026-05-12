@@ -19,6 +19,9 @@ struct HistoryItem {
     long long replyToMessageId{0};
     std::string replyToSender;
     std::string replyToText;
+    long long forwardFromMessageId{0};
+    std::string forwardFromSender;
+    std::string forwardFromText;
 };
 
 struct ChatSummary {
@@ -85,6 +88,8 @@ public:
     bool sendPrivateMessage(const std::string& recipient,
                             const std::string& text,
                             const std::string& replyToMessageId = "");
+    bool forwardMessage(const std::string& recipient,
+                        const std::string& sourceMessageId);
     bool fetchHistory(const std::string& peer, const std::string& limit = "");
     bool fetchChats();
     bool searchUsers(const std::string& query);

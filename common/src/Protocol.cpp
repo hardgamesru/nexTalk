@@ -80,6 +80,7 @@ namespace common {
         case CommandType::Login: return "login";
         case CommandType::LoginResult: return "login_result";
         case CommandType::SendMessage: return "send_message";
+        case CommandType::ForwardMessage: return "forward_message";
         case CommandType::SendMessageResult: return "send_message_result";
         case CommandType::IncomingMessage: return "incoming_message";
         case CommandType::FetchHistory: return "fetch_history";
@@ -112,6 +113,7 @@ namespace common {
         if (value == "login") return CommandType::Login;
         if (value == "login_result") return CommandType::LoginResult;
         if (value == "send_message") return CommandType::SendMessage;
+        if (value == "forward_message") return CommandType::ForwardMessage;
         if (value == "send_message_result") return CommandType::SendMessageResult;
         if (value == "incoming_message") return CommandType::IncomingMessage;
         if (value == "fetch_history") return CommandType::FetchHistory;
