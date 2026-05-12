@@ -94,6 +94,8 @@ namespace common {
         case CommandType::CreateChatResult: return "create_chat_result";
         case CommandType::DeleteChat: return "delete_chat";
         case CommandType::DeleteChatResult: return "delete_chat_result";
+        case CommandType::MarkRead: return "mark_read";
+        case CommandType::MarkReadResult: return "mark_read_result";
         case CommandType::Info: return "info";
         case CommandType::Error: return "error";
         case CommandType::Quit: return "quit";
@@ -123,6 +125,8 @@ namespace common {
         if (value == "create_chat_result") return CommandType::CreateChatResult;
         if (value == "delete_chat") return CommandType::DeleteChat;
         if (value == "delete_chat_result") return CommandType::DeleteChatResult;
+        if (value == "mark_read") return CommandType::MarkRead;
+        if (value == "mark_read_result") return CommandType::MarkReadResult;
         if (value == "info") return CommandType::Info;
         if (value == "error") return CommandType::Error;
         if (value == "quit") return CommandType::Quit;

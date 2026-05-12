@@ -121,6 +121,12 @@ private:
                           const common::ProtocolMessage& message);
 
     /**
+     * Помечает диалог как прочитанный для текущего пользователя.
+     */
+    void handleMarkRead(const std::shared_ptr<ClientSession>& session,
+                        const common::ProtocolMessage& message);
+
+    /**
      * Удаляет личный диалог и его историю.
      */
     void handleDeleteChat(const std::shared_ptr<ClientSession>& session,

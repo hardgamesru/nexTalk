@@ -32,6 +32,8 @@ namespace common {
         CreateChatResult,
         DeleteChat,
         DeleteChatResult,
+        MarkRead,
+        MarkReadResult,
         Info,
         Error,
         Quit,

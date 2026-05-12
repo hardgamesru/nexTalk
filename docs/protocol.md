@@ -111,6 +111,18 @@ delete_chat<TAB>bob
 
 1. username собеседника.
 
+### mark_read
+
+```text
+mark_read<TAB>bob
+```
+
+Помечает личный диалог как прочитанный для текущего пользователя.
+
+Поля:
+
+1. username собеседника.
+
 ### quit
 
 ```text
@@ -201,7 +213,7 @@ history_result<TAB>ok<TAB>history with bob: 1 message(s)
 ### chat_item
 
 ```text
-chat_item<TAB>2<TAB>bob<TAB>2026-05-11 14:01:05<TAB>alice<TAB>Привет
+chat_item<TAB>2<TAB>bob<TAB>2026-05-11 14:01:05<TAB>alice<TAB>Привет<TAB>3
 ```
 
 Один диалог в списке чатов.
@@ -214,6 +226,7 @@ chat_item<TAB>2<TAB>bob<TAB>2026-05-11 14:01:05<TAB>alice<TAB>Привет
 3. время последнего сообщения;
 4. отправитель последнего сообщения;
 5. текст последнего сообщения.
+6. количество непрочитанных сообщений от собеседника.
 
 ### chat_list_result
 
@@ -280,6 +293,19 @@ delete_chat_result<TAB>ok<TAB>deleted<TAB>bob
 1. статус: `ok` или `error`;
 2. описание результата или ошибки;
 3. username удаленного собеседника, если сервер смог его определить.
+
+### mark_read_result
+
+```text
+mark_read_result<TAB>ok<TAB>bob
+```
+
+Завершает ответ на `mark_read`.
+
+Поля:
+
+1. статус: `ok` или `error`;
+2. username собеседника (при `ok`) или описание ошибки (при `error`).
 
 ## Пример обмена
 

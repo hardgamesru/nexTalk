@@ -22,6 +22,7 @@ struct ChatSummary {
     std::string lastAt;
     std::string lastSender;
     std::string lastText;
+    int unreadCount{0};
 };
 
 struct UserSearchResult {
@@ -67,6 +68,9 @@ public:
                       int limit,
                       std::vector<StoredMessage>& messages,
                       std::string& error);
+    bool markConversationRead(const std::string& user,
+                              const std::string& peer,
+                              std::string& error);
     bool fetchChats(const std::string& user,
                     std::vector<ChatSummary>& chats,
                     std::string& error);
@@ -85,6 +89,9 @@ public:
 
 private:
     bool executeLocked(const char* sql, std::string& error);
+    bool markConversationReadLocked(long long conversationId,
+                                    const std::string& username,
+                                    std::string& error);
     bool ensureSchemaLocked(std::string& error);
     bool ensureColumnLocked(const std::string& table,
                             const std::string& column,

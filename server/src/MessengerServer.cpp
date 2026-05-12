@@ -416,6 +416,9 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::CreateChat:
             handleCreateChat(session, message);
             break;
+        case common::CommandType::MarkRead:
+            handleMarkRead(session, message);
+            break;
         case common::CommandType::DeleteChat:
             handleDeleteChat(session, message);
             break;
@@ -645,7 +648,12 @@ void MessengerServer::handleFetchChats(const std::shared_ptr<ClientSession>& ses
 
     for (const auto& chat : chats) {
         sendToSession(session, {common::CommandType::ChatItem,
-                                {chat.peerId, chat.peer, chat.lastAt, chat.lastSender, chat.lastText}});
+                                {chat.peerId,
+                                 chat.peer,
+                                 chat.lastAt,
+                                 chat.lastSender,
+                                 chat.lastText,
+                                 std::to_string(chat.unreadCount)}});
     }
 
     sendToSession(session, {common::CommandType::ChatListResult,
@@ -714,6 +722,30 @@ void MessengerServer::handleCreateChat(const std::shared_ptr<ClientSession>& ses
     sendToSession(session, {common::CommandType::CreateChatResult, {"ok", message.fields[0], peer}});
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
     logEvent("chat_created user=" + session->username + " peer=" + peer);
+}
+
+void MessengerServer::handleMarkRead(const std::shared_ptr<ClientSession>& session,
+                                     const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
+        sendToSession(session, {common::CommandType::MarkReadResult, {"error", "invalid chat"}});
+        return;
+    }
+
+    std::string storageError;
+    if (!messageStore_.markConversationRead(session->username, message.fields[0], storageError)) {
+        logEvent("chat_mark_read_failed user=" + session->username +
+                 " peer=" + message.fields[0] +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::MarkReadResult, {"error", "storage error"}});
+        return;
+    }
+
+    sendToSession(session, {common::CommandType::MarkReadResult, {"ok", message.fields[0]}});
 }
 
 void MessengerServer::handleDeleteChat(const std::shared_ptr<ClientSession>& session,

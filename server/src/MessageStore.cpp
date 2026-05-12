@@ -306,7 +306,14 @@ bool MessageStore::fetchChats(const std::string& user,
                         "  peer.username,"
                         "  m.created_at,"
                         "  m.sender,"
-                        "  m.body "
+                        "  m.body,"
+                        "  COALESCE(("
+                        "    SELECT COUNT(1) "
+                        "    FROM messages unread "
+                        "    WHERE unread.conversation_id = c.id "
+                        "      AND unread.sender != ? "
+                        "      AND unread.id > COALESCE(cr.last_read_message_id, 0)"
+                        "  ), 0) "
                         "FROM conversations c "
                         "JOIN users peer ON peer.username = "
                         "  CASE WHEN c.user_low = ? THEN c.user_high ELSE c.user_low END "
@@ -316,6 +323,8 @@ bool MessageStore::fetchChats(const std::string& user,
                         "  ORDER BY id DESC "
                         "  LIMIT 1"
                         ") "
+                        "LEFT JOIN conversation_reads cr "
+                        "  ON cr.conversation_id = c.id AND cr.username = ? "
                         "WHERE c.user_low = ? OR c.user_high = ? "
                         "ORDER BY CASE WHEN m.id IS NULL THEN c.id ELSE m.id END DESC;",
                         error);
@@ -326,6 +335,8 @@ bool MessageStore::fetchChats(const std::string& user,
     sqlite3_bind_text(statement.get(), 1, user.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(statement.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(statement.get(), 3, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 4, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 5, user.c_str(), -1, SQLITE_TRANSIENT);
 
     while (true) {
         const int result = sqlite3_step(statement.get());
@@ -348,7 +359,8 @@ bool MessageStore::fetchChats(const std::string& user,
             columnText(1),
             columnText(2),
             columnText(3),
-            columnText(4)
+            columnText(4),
+            sqlite3_column_int(statement.get(), 5)
         });
     }
 }
@@ -488,7 +500,7 @@ bool MessageStore::fetchHistory(const std::string& user,
     }
 
     Statement statement(db_,
-                        "SELECT created_at, sender, recipient, body "
+                        "SELECT id, created_at, sender, recipient, body "
                         "FROM ("
                         "  SELECT id, created_at, sender, recipient, body "
                         "  FROM messages "
@@ -508,7 +520,7 @@ bool MessageStore::fetchHistory(const std::string& user,
     while (true) {
         const int result = sqlite3_step(statement.get());
         if (result == SQLITE_DONE) {
-            return true;
+            return markConversationReadLocked(conversationId, user, error);
         }
 
         if (result != SQLITE_ROW) {
@@ -522,12 +534,82 @@ bool MessageStore::fetchHistory(const std::string& user,
         };
 
         messages.push_back({
-            columnText(0),
             columnText(1),
             columnText(2),
-            columnText(3)
+            columnText(3),
+            columnText(4)
         });
     }
+}
+
+bool MessageStore::markConversationRead(const std::string& user,
+                                        const std::string& peer,
+                                        std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    long long conversationId = 0;
+    if (!findConversationLocked(user, peer, conversationId, error)) {
+        return false;
+    }
+
+    if (conversationId == 0) {
+        return true;
+    }
+
+    return markConversationReadLocked(conversationId, user, error);
+}
+
+bool MessageStore::markConversationReadLocked(long long conversationId,
+                                              const std::string& username,
+                                              std::string& error) {
+    Statement maxMessageStatement(db_,
+                                  "SELECT COALESCE(MAX(id), 0) "
+                                  "FROM messages "
+                                  "WHERE conversation_id = ?;",
+                                  error);
+    if (!maxMessageStatement) {
+        return false;
+    }
+
+    sqlite3_bind_int64(maxMessageStatement.get(), 1, conversationId);
+    const int maxResult = sqlite3_step(maxMessageStatement.get());
+    if (maxResult != SQLITE_ROW) {
+        if (maxResult == SQLITE_DONE) {
+            return true;
+        }
+        error = lastError(db_);
+        return false;
+    }
+
+    const long long maxMessageId = sqlite3_column_int64(maxMessageStatement.get(), 0);
+
+    Statement upsertStatement(db_,
+                              "INSERT INTO conversation_reads("
+                              "  conversation_id,"
+                              "  username,"
+                              "  last_read_message_id,"
+                              "  updated_at"
+                              ") VALUES (?, ?, ?, CURRENT_TIMESTAMP) "
+                              "ON CONFLICT(conversation_id, username) "
+                              "DO UPDATE SET "
+                              "  last_read_message_id = excluded.last_read_message_id,"
+                              "  updated_at = CURRENT_TIMESTAMP;",
+                              error);
+    if (!upsertStatement) {
+        return false;
+    }
+
+    sqlite3_bind_int64(upsertStatement.get(), 1, conversationId);
+    sqlite3_bind_text(upsertStatement.get(), 2, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(upsertStatement.get(), 3, maxMessageId);
+
+    const int upsertResult = sqlite3_step(upsertStatement.get());
+    if (upsertResult != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+
+    return true;
 }
 
 bool MessageStore::deleteConversation(const std::string& user,
@@ -635,8 +717,18 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
         "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
         ");"
+        "CREATE TABLE IF NOT EXISTS conversation_reads ("
+        "  conversation_id INTEGER NOT NULL,"
+        "  username TEXT NOT NULL,"
+        "  last_read_message_id INTEGER NOT NULL DEFAULT 0,"
+        "  updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  UNIQUE(conversation_id, username),"
+        "  FOREIGN KEY(conversation_id) REFERENCES conversations(id) ON DELETE CASCADE"
+        ");"
         "CREATE INDEX IF NOT EXISTS idx_messages_conversation_id "
-        "ON messages(conversation_id, id);",
+        "ON messages(conversation_id, id);"
+        "CREATE INDEX IF NOT EXISTS idx_conversation_reads_user "
+        "ON conversation_reads(username, conversation_id);",
         error)) {
         return false;
     }
