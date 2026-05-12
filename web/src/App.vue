@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from "vue";
+import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 
 type ProtocolMessage = {
   command: string;
@@ -16,10 +16,14 @@ type ChatItem = {
 };
 
 type ChatMessage = {
+  id: number;
   createdAt: string;
   sender: string;
   recipient: string;
   text: string;
+  replyToMessageId: number | null;
+  replyToSender: string;
+  replyToText: string;
 };
 
 type SearchUser = {
@@ -66,6 +70,12 @@ const ui = reactive({
   searchQuery: "",
   searchInFlight: false,
   logs: [] as string[],
+  replyTarget: null as ChatMessage | null,
+  contextMenuVisible: false,
+  contextMenuX: 0,
+  contextMenuY: 0,
+  contextMenuMessageId: 0,
+  highlightedMessageId: 0,
 });
 
 const chats = ref<ChatItem[]>([]);
@@ -81,6 +91,7 @@ const stickLogsToBottom = ref(true);
 let ws: WebSocket | null = null;
 let pendingAuth: { mode: "login" | "register"; username: string; password: string } | null = null;
 let authCredentials: { username: string; password: string } | null = null;
+let highlightTimer: number | null = null;
 
 const filteredChats = computed(() => {
   const query = ui.chatFilter.trim().toLowerCase();
@@ -135,6 +146,43 @@ function formatServerTime(value: string) {
   }
 
   return parsed.toLocaleString();
+}
+
+function parseChatMessage(fields: string[], offset = 0) {
+  if (fields.length < offset + 5) {
+    return null;
+  }
+
+  const id = Number.parseInt(fields[offset] ?? "", 10);
+  if (!Number.isFinite(id) || id <= 0) {
+    return null;
+  }
+
+  const replyToRaw = fields[offset + 5] ?? "";
+  const replyToMessageId = replyToRaw ? Number.parseInt(replyToRaw, 10) : null;
+
+  return {
+    id,
+    createdAt: fields[offset + 1] ?? "",
+    sender: fields[offset + 2] ?? "",
+    recipient: fields[offset + 3] ?? "",
+    text: fields[offset + 4] ?? "",
+    replyToMessageId: replyToMessageId && Number.isFinite(replyToMessageId) ? replyToMessageId : null,
+    replyToSender: fields[offset + 6] ?? "",
+    replyToText: fields[offset + 7] ?? "",
+  } as ChatMessage;
+}
+
+function peerForMessage(message: ChatMessage) {
+  return message.sender === session.currentUser ? message.recipient : message.sender;
+}
+
+function excerpt(value: string, limit = 90) {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= limit) {
+    return normalized;
+  }
+  return `${normalized.slice(0, limit - 1)}...`;
 }
 
 function escapeField(value: string) {
@@ -208,6 +256,10 @@ function clearSessionData() {
   session.selectedPeer = "";
   ui.messageDraft = "";
   ui.chatFilter = "";
+  ui.replyTarget = null;
+  ui.contextMenuVisible = false;
+  ui.contextMenuMessageId = 0;
+  ui.highlightedMessageId = 0;
   searchResults.value = [];
   Object.keys(chatIndex).forEach((key) => {
     delete chatIndex[key];
@@ -216,6 +268,13 @@ function clearSessionData() {
     delete messagesByPeer[key];
   });
   chats.value = [];
+}
+
+function clearHighlightTimer() {
+  if (highlightTimer !== null) {
+    window.clearTimeout(highlightTimer);
+    highlightTimer = null;
+  }
 }
 
 function resetToWelcome(error = "") {
@@ -345,6 +404,8 @@ function beginAuth(mode: "login" | "register") {
 
 function selectPeer(peer: string) {
   session.selectedPeer = peer;
+  ui.replyTarget = null;
+  ui.contextMenuVisible = false;
   messagesByPeer[peer] = [];
   sendCommand("fetch_history", [peer, String(ui.historyLimit)]);
   nextTick(() => {
@@ -356,7 +417,13 @@ function selectPeer(peer: string) {
 
 function pushMessage(peer: string, message: ChatMessage) {
   const arr = messagesByPeer[peer] ?? (messagesByPeer[peer] = []);
-  arr.push(message);
+  const existingIndex = arr.findIndex((item) => item.id === message.id);
+  if (existingIndex >= 0) {
+    arr.splice(existingIndex, 1, message);
+  } else {
+    arr.push(message);
+  }
+  arr.sort((left, right) => left.id - right.id);
   if (arr.length > 400) {
     arr.splice(0, arr.length - 400);
   }
@@ -377,15 +444,15 @@ function sendMessage() {
     return;
   }
 
-  sendCommand("send_message", [peer, text]);
-  pushMessage(peer, {
-    createdAt: new Date().toISOString(),
-    sender: session.currentUser,
-    recipient: peer,
-    text,
-  });
-  sendCommand("mark_read", [peer]);
+  const fields = [peer, text];
+  if (ui.replyTarget?.id) {
+    fields.push(String(ui.replyTarget.id));
+  }
+
+  sendCommand("send_message", fields);
   ui.messageDraft = "";
+  ui.replyTarget = null;
+  ui.contextMenuVisible = false;
 }
 
 function clearChatIndex() {
@@ -434,6 +501,53 @@ function deleteChat(peer: string) {
   sendCommand("delete_chat", [peer]);
 }
 
+function closeContextMenu() {
+  ui.contextMenuVisible = false;
+  ui.contextMenuMessageId = 0;
+}
+
+function openContextMenu(event: MouseEvent, message: ChatMessage) {
+  event.preventDefault();
+  ui.contextMenuVisible = true;
+  ui.contextMenuX = event.clientX;
+  ui.contextMenuY = event.clientY;
+  ui.contextMenuMessageId = message.id;
+}
+
+function beginReply() {
+  const message = currentMessages.value.find((item) => item.id === ui.contextMenuMessageId) ?? null;
+  if (message) {
+    ui.replyTarget = message;
+  }
+  closeContextMenu();
+}
+
+function cancelReply() {
+  ui.replyTarget = null;
+}
+
+function jumpToMessage(messageId: number | null) {
+  if (!messageId) {
+    return;
+  }
+
+  nextTick(() => {
+    const target = document.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
+    if (!target) {
+      pushLog(`Referenced message #${messageId} is not loaded in the current history window`);
+      return;
+    }
+
+    clearHighlightTimer();
+    ui.highlightedMessageId = messageId;
+    target.scrollIntoView({ behavior: "smooth", block: "center" });
+    highlightTimer = window.setTimeout(() => {
+      ui.highlightedMessageId = 0;
+      highlightTimer = null;
+    }, 1200);
+  });
+}
+
 function onMessagesScroll() {
   const viewport = messagesViewport.value;
   if (!viewport) {
@@ -456,12 +570,26 @@ function signOut() {
   session.profileMenuOpen = false;
   if (connection.tcpConnected) {
     sendCommand("quit");
-    sendBridge({ type: "disconnect" });
   }
   form.username = "";
   form.password = "";
   resetToWelcome();
 }
+
+const dismissMenus = () => {
+  closeContextMenu();
+};
+
+onMounted(() => {
+  window.addEventListener("click", dismissMenus);
+  window.addEventListener("scroll", dismissMenus, true);
+});
+
+onBeforeUnmount(() => {
+  window.removeEventListener("click", dismissMenus);
+  window.removeEventListener("scroll", dismissMenus, true);
+  clearHighlightTimer();
+});
 
 function upsertChat(chat: ChatItem) {
   chatIndex[chat.peer] = chat;
@@ -521,14 +649,30 @@ function handleProtocolMessage(message: ProtocolMessage) {
       }
       pushLog(`Login ${a}: ${b}`);
       break;
+    case "send_message_result":
+      if (a === "ok") {
+        const sentMessage = parseChatMessage(message.fields, 1);
+        if (!sentMessage) {
+          pushLog("Send result parse error");
+          break;
+        }
+
+        const peer = peerForMessage(sentMessage);
+        pushMessage(peer, sentMessage);
+        sendCommand("mark_read", [peer]);
+      } else {
+        pushLog(`Send error: ${b}`);
+      }
+      break;
     case "incoming_message": {
-      const peer = a;
-      pushMessage(peer, {
-        createdAt: new Date().toISOString(),
-        sender: a,
-        recipient: session.currentUser,
-        text: b,
-      });
+      const incomingMessage = parseChatMessage(message.fields);
+      if (!incomingMessage) {
+        pushLog("Incoming message parse error");
+        break;
+      }
+
+      const peer = peerForMessage(incomingMessage);
+      pushMessage(peer, incomingMessage);
       if (session.selectedPeer === peer) {
         sendCommand("mark_read", [peer]);
       }
@@ -536,13 +680,14 @@ function handleProtocolMessage(message: ProtocolMessage) {
       break;
     }
     case "history_message": {
-      const peer = b === session.currentUser ? c : b;
-      pushMessage(peer, {
-        createdAt: a,
-        sender: b,
-        recipient: c,
-        text: d,
-      });
+      const historyMessage = parseChatMessage(message.fields);
+      if (!historyMessage) {
+        pushLog("History message parse error");
+        break;
+      }
+
+      const peer = peerForMessage(historyMessage);
+      pushMessage(peer, historyMessage);
       break;
     }
     case "history_result":
@@ -596,7 +741,8 @@ function handleProtocolMessage(message: ProtocolMessage) {
         chats.value = Object.values(chatIndex);
         delete messagesByPeer[removedPeer];
         if (session.selectedPeer === removedPeer) {
-          session.selectedPeer = chats.value[0]?.peer ?? "";
+          session.selectedPeer = "";
+          ui.replyTarget = null;
         }
       } else {
         pushLog(`Delete chat error: ${b}`);
@@ -702,31 +848,64 @@ watch(
           <h3>Привет</h3>
           <p>Выберите чат в списке слева, чтобы увидеть переписку.</p>
         </div>
-        <template v-for="(message, idx) in currentMessages" :key="idx">
-          <article class="message-row" :class="{ own: message.sender === session.currentUser }">
+        <template v-for="(message, idx) in currentMessages" :key="message.id || idx">
+          <article
+            class="message-row"
+            :class="{ own: message.sender === session.currentUser, highlighted: ui.highlightedMessageId === message.id }"
+            :data-message-id="message.id"
+            @contextmenu="openContextMenu($event, message)"
+          >
             <div class="avatar">{{ (message.sender || "?").slice(0, 1).toUpperCase() }}</div>
             <div class="bubble">
               <div class="meta">
                 <strong>{{ message.sender }}</strong>
                 <small>{{ formatServerTime(message.createdAt) }}</small>
               </div>
+              <button
+                v-if="message.replyToMessageId"
+                class="reply-snippet"
+                type="button"
+                @click="jumpToMessage(message.replyToMessageId)"
+              >
+                <strong>{{ message.replyToSender || "Message" }}</strong>
+                <span>{{ excerpt(message.replyToText || "Deleted message") }}</span>
+              </button>
               <p>{{ message.text }}</p>
             </div>
           </article>
         </template>
+
+        <div
+          v-if="ui.contextMenuVisible"
+          class="message-menu"
+          :style="{ left: `${ui.contextMenuX}px`, top: `${ui.contextMenuY}px` }"
+        >
+          <button class="message-menu-item" @click.stop="beginReply">Reply</button>
+        </div>
       </section>
 
       <footer class="composer">
-        <input
-          v-model="ui.messageDraft"
-          type="text"
-          placeholder="Write a message"
-          :disabled="!session.selectedPeer || !session.loggedIn"
-          @keydown.enter.prevent="sendMessage"
-        />
-        <button class="primary" @click="sendMessage" :disabled="!ui.messageDraft.trim() || !session.selectedPeer">
-          Send
-        </button>
+        <div class="composer-main">
+          <div v-if="ui.replyTarget" class="reply-draft">
+            <div class="reply-draft-copy">
+              <strong>{{ ui.replyTarget.sender }}</strong>
+              <span>{{ excerpt(ui.replyTarget.text) }}</span>
+            </div>
+            <button class="reply-cancel" @click="cancelReply">x</button>
+          </div>
+          <div class="composer-row">
+            <input
+              v-model="ui.messageDraft"
+              type="text"
+              placeholder="Write a message"
+              :disabled="!session.selectedPeer || !session.loggedIn"
+              @keydown.enter.prevent="sendMessage"
+            />
+            <button class="primary" @click="sendMessage" :disabled="!ui.messageDraft.trim() || !session.selectedPeer">
+              Send
+            </button>
+          </div>
+        </div>
       </footer>
     </main>
 

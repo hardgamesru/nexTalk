@@ -117,8 +117,14 @@ bool ClientConnection::login(const std::string& username, const std::string& pas
     return sendMessage({common::CommandType::Login, {username, password}});
 }
 
-bool ClientConnection::sendPrivateMessage(const std::string& recipient, const std::string& text) {
-    return sendMessage({common::CommandType::SendMessage, {recipient, text}});
+bool ClientConnection::sendPrivateMessage(const std::string& recipient,
+                                          const std::string& text,
+                                          const std::string& replyToMessageId) {
+    if (replyToMessageId.empty()) {
+        return sendMessage({common::CommandType::SendMessage, {recipient, text}});
+    }
+
+    return sendMessage({common::CommandType::SendMessage, {recipient, text, replyToMessageId}});
 }
 
 bool ClientConnection::fetchHistory(const std::string& peer, const std::string& limit) {
@@ -233,6 +239,43 @@ void ClientConnection::receiverLoop() {
 
 void ClientConnection::handleServerMessage(const common::ProtocolMessage& message) {
     auto callbacks = callbacksSnapshot();
+    auto parseMessageItem = [](const std::vector<std::string>& fields, std::size_t offset, HistoryItem& item) -> bool {
+        if (fields.size() < offset + 5) {
+            return false;
+        }
+
+        item = HistoryItem{};
+        if (!fields[offset].empty()) {
+            try {
+                item.id = std::stoll(fields[offset]);
+            } catch (...) {
+                return false;
+            }
+        }
+
+        item.createdAt = fields[offset + 1];
+        item.sender = fields[offset + 2];
+        item.recipient = fields[offset + 3];
+        item.text = fields[offset + 4];
+
+        if (fields.size() >= offset + 6 && !fields[offset + 5].empty()) {
+            try {
+                item.replyToMessageId = std::stoll(fields[offset + 5]);
+            } catch (...) {
+                return false;
+            }
+        }
+
+        if (fields.size() >= offset + 7) {
+            item.replyToSender = fields[offset + 6];
+        }
+
+        if (fields.size() >= offset + 8) {
+            item.replyToText = fields[offset + 7];
+        }
+
+        return true;
+    };
 
     switch (message.type) {
     case common::CommandType::Info:
@@ -250,19 +293,31 @@ void ClientConnection::handleServerMessage(const common::ProtocolMessage& messag
             callbacks.onRegisterResult(message.fields[0], message.fields[1]);
         }
         break;
+    case common::CommandType::SendMessageResult:
+        if (!message.fields.empty() && callbacks.onSendMessageResult) {
+            HistoryItem item;
+            const std::string text = message.fields.size() >= 2 ? message.fields[1] : "";
+            if (message.fields[0] == "ok" && parseMessageItem(message.fields, 1, item)) {
+                callbacks.onSendMessageResult(message.fields[0], item, {});
+            } else {
+                callbacks.onSendMessageResult(message.fields[0], {}, text);
+            }
+        }
+        break;
     case common::CommandType::IncomingMessage:
-        if (message.fields.size() >= 2 && callbacks.onIncomingMessage) {
-            callbacks.onIncomingMessage(message.fields[0], message.fields[1]);
+        if (callbacks.onIncomingMessage) {
+            HistoryItem item;
+            if (parseMessageItem(message.fields, 0, item)) {
+                callbacks.onIncomingMessage(item);
+            }
         }
         break;
     case common::CommandType::HistoryMessage:
-        if (message.fields.size() >= 4 && callbacks.onHistoryMessage) {
-            callbacks.onHistoryMessage({
-                message.fields[0],
-                message.fields[1],
-                message.fields[2],
-                message.fields[3]
-            });
+        if (callbacks.onHistoryMessage) {
+            HistoryItem item;
+            if (parseMessageItem(message.fields, 0, item)) {
+                callbacks.onHistoryMessage(item);
+            }
         }
         break;
     case common::CommandType::HistoryResult:

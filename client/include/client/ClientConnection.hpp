@@ -11,10 +11,14 @@
 namespace client {
 
 struct HistoryItem {
+    long long id{0};
     std::string createdAt;
     std::string sender;
     std::string recipient;
     std::string text;
+    long long replyToMessageId{0};
+    std::string replyToSender;
+    std::string replyToText;
 };
 
 struct ChatSummary {
@@ -44,7 +48,8 @@ public:
         std::function<void(const std::string&)> onError;
         std::function<void(const std::string& status, const std::string& text)> onRegisterResult;
         std::function<void(const std::string& status, const std::string& text)> onLoginResult;
-        std::function<void(const std::string& sender, const std::string& text)> onIncomingMessage;
+        std::function<void(const HistoryItem& item)> onIncomingMessage;
+        std::function<void(const std::string& status, const HistoryItem& item, const std::string& text)> onSendMessageResult;
         std::function<void(const HistoryItem& item)> onHistoryMessage;
         std::function<void(const std::string& status, const std::string& text)> onHistoryResult;
         std::function<void(const ChatSummary& chat)> onChatItem;
@@ -77,7 +82,9 @@ public:
     bool isRunning() const;
     bool registerAccount(const std::string& username, const std::string& password);
     bool login(const std::string& username, const std::string& password);
-    bool sendPrivateMessage(const std::string& recipient, const std::string& text);
+    bool sendPrivateMessage(const std::string& recipient,
+                            const std::string& text,
+                            const std::string& replyToMessageId = "");
     bool fetchHistory(const std::string& peer, const std::string& limit = "");
     bool fetchChats();
     bool searchUsers(const std::string& query);

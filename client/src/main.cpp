@@ -93,16 +93,39 @@ int main(int argc, char* argv[]) {
         std::cout << "\n[login] " << status << ": " << text << '\n';
         printPrompt();
     };
-    callbacks.onIncomingMessage = [](const std::string& sender, const std::string& text) {
+    callbacks.onIncomingMessage = [](const client::HistoryItem& item) {
         std::lock_guard<std::mutex> lock(g_outputMutex);
-        std::cout << "\n[from " << sender << "] " << text << '\n';
+        std::cout << "\n[from " << item.sender << "] " << item.text;
+        if (item.replyToMessageId > 0) {
+            std::cout << " [reply to #" << item.replyToMessageId << " " << item.replyToSender << "]";
+        }
+        std::cout << '\n';
+        printPrompt();
+    };
+    callbacks.onSendMessageResult = [](const std::string& status, const client::HistoryItem& item, const std::string& text) {
+        std::lock_guard<std::mutex> lock(g_outputMutex);
+        if (status == "ok") {
+            std::cout << "\n[sent #" << item.id << " " << item.createdAt << "] "
+                      << item.sender << " -> " << item.recipient
+                      << ": " << item.text;
+            if (item.replyToMessageId > 0) {
+                std::cout << " [reply to #" << item.replyToMessageId << " " << item.replyToSender << "]";
+            }
+            std::cout << '\n';
+        } else {
+            std::cout << "\n[send] " << status << ": " << text << '\n';
+        }
         printPrompt();
     };
     callbacks.onHistoryMessage = [](const client::HistoryItem& item) {
         std::lock_guard<std::mutex> lock(g_outputMutex);
-        std::cout << "\n[history " << item.createdAt << "] "
+        std::cout << "\n[history #" << item.id << " " << item.createdAt << "] "
                   << item.sender << " -> " << item.recipient
-                  << ": " << item.text << '\n';
+                  << ": " << item.text;
+        if (item.replyToMessageId > 0) {
+            std::cout << " [reply to #" << item.replyToMessageId << " " << item.replyToSender << "]";
+        }
+        std::cout << '\n';
         printPrompt();
     };
     callbacks.onHistoryResult = [](const std::string& status, const std::string& text) {

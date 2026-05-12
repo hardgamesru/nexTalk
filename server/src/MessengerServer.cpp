@@ -529,13 +529,22 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         return;
     }
 
-    if (message.fields.size() != 2 || !isValidUsername(message.fields[0]) || message.fields[1].empty()) {
-        sendToSession(session, {common::CommandType::Error, {"usage: /msg <user> <text>"}});
+    if ((message.fields.size() != 2 && message.fields.size() != 3) ||
+        !isValidUsername(message.fields[0]) ||
+        message.fields[1].empty()) {
+        sendToSession(session, {common::CommandType::Error, {"usage: /msg <user> <text> [reply_id]"}});
         return;
     }
 
     const std::string recipientName = message.fields[0];
     const std::string text = message.fields[1];
+    long long replyToMessageId = 0;
+    if (message.fields.size() == 3 && !message.fields[2].empty() &&
+        !parsePositiveInt64(message.fields[2], replyToMessageId)) {
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "invalid reply target"}});
+        return;
+    }
+
     std::shared_ptr<ClientSession> recipient;
 
     {
@@ -551,16 +560,45 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
 
     logEvent("message_received from=" + session->username +
              " to=" + recipientName +
+             (replyToMessageId > 0 ? " reply_to=" + std::to_string(replyToMessageId) : "") +
              " text=\"" + escapeLogField(text) + "\"");
 
     std::string storageError;
-    if (!messageStore_.saveMessage(session->username, recipientName, text, storageError)) {
+    StoredMessage storedMessage;
+    if (!messageStore_.saveMessage(session->username,
+                                   recipientName,
+                                   text,
+                                   replyToMessageId,
+                                   storedMessage,
+                                   storageError)) {
         logEvent("message_store_failed from=" + session->username +
                  " to=" + recipientName +
                  " error=\"" + escapeLogField(storageError) + "\"");
-        sendToSession(session, {common::CommandType::Error, {storageError}});
+        sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError}});
         return;
     }
+
+    const std::vector<std::string> messageFields = {
+        std::to_string(storedMessage.id),
+        storedMessage.createdAt,
+        storedMessage.sender,
+        storedMessage.recipient,
+        storedMessage.text,
+        storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
+        storedMessage.replyToSender,
+        storedMessage.replyToText
+    };
+
+    sendToSession(session, {common::CommandType::SendMessageResult,
+                            {"ok",
+                             std::to_string(storedMessage.id),
+                             storedMessage.createdAt,
+                             storedMessage.sender,
+                             storedMessage.recipient,
+                             storedMessage.text,
+                             storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
+                             storedMessage.replyToSender,
+                             storedMessage.replyToText}});
 
     if (!recipient) {
         sendToSession(session, {common::CommandType::Info, {"saved for offline user " + recipientName}});
@@ -569,7 +607,7 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         return;
     }
 
-    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, {session->username, text}})) {
+    if (!sendToSession(recipient, {common::CommandType::IncomingMessage, messageFields})) {
         sendToSession(session, {common::CommandType::Info, {"saved; delivery will be available in history"}});
         logEvent("message_delivery_failed_saved from=" + session->username + " to=" + recipientName);
         return;
@@ -617,7 +655,14 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
 
     for (const auto& item : history) {
         sendToSession(session, {common::CommandType::HistoryMessage,
-                                {item.createdAt, item.sender, item.recipient, item.text}});
+                                {std::to_string(item.id),
+                                 item.createdAt,
+                                 item.sender,
+                                 item.recipient,
+                                 item.text,
+                                 item.replyToMessageId > 0 ? std::to_string(item.replyToMessageId) : "",
+                                 item.replyToSender,
+                                 item.replyToText}});
     }
 
     sendToSession(session, {common::CommandType::HistoryResult,

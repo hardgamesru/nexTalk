@@ -342,14 +342,30 @@ void MainWindow::installConnectionCallbacks() {
             }
         }, Qt::QueuedConnection);
     };
-    callbacks.onIncomingMessage = [this](const std::string& sender, const std::string& text) {
-        QMetaObject::invokeMethod(this, [this, sender, text] {
-            const QString peer = QString::fromStdString(sender);
+    callbacks.onIncomingMessage = [this](const client::HistoryItem& item) {
+        QMetaObject::invokeMethod(this, [this, item] {
+            const QString peer = QString::fromStdString(item.sender);
             rememberPeer(peer);
             if (currentPeer().isEmpty()) {
                 selectPeer(peer);
             }
-            appendChatMessage(peer, QString::fromStdString(text));
+            appendHistoryMessage(item);
+            connection_->fetchChats();
+        }, Qt::QueuedConnection);
+    };
+    callbacks.onSendMessageResult = [this](const std::string& status,
+                                           const client::HistoryItem& item,
+                                           const std::string& text) {
+        QMetaObject::invokeMethod(this, [this, status, item, text] {
+            if (status != "ok") {
+                appendSystemMessage("Send " + QString::fromStdString(status) +
+                                    ": " + QString::fromStdString(text));
+                return;
+            }
+
+            appendHistoryMessage(item);
+            messageEdit_->clear();
+            updateChatActions();
             connection_->fetchChats();
         }, Qt::QueuedConnection);
     };
@@ -523,10 +539,6 @@ void MainWindow::sendMessage() {
 
     rememberPeer(peer);
     connection_->sendPrivateMessage(peer.toStdString(), text.toStdString());
-    appendChatMessage(currentUsername_, text);
-    messageEdit_->clear();
-    updateChatActions();
-    connection_->fetchChats();
 }
 
 void MainWindow::requestHistory() {
@@ -957,24 +969,44 @@ void MainWindow::appendSystemMessage(const QString& text) {
     systemLog_->append("[" + QTime::currentTime().toString("HH:mm:ss") + "] " + text);
 }
 
-void MainWindow::appendChatMessage(const QString& sender, const QString& text, const QString& createdAt) {
-    transcript_->append(renderMessageHtml(sender, text, createdAt));
+void MainWindow::appendChatMessage(const QString& sender,
+                                   const QString& text,
+                                   const QString& createdAt,
+                                   const QString& replySender,
+                                   const QString& replyText) {
+    transcript_->append(renderMessageHtml(sender, text, createdAt, replySender, replyText));
 }
 
 void MainWindow::appendHistoryMessage(const client::HistoryItem& item) {
     appendChatMessage(QString::fromStdString(item.sender),
                       QString::fromStdString(item.text),
-                      QString::fromStdString(item.createdAt));
+                      QString::fromStdString(item.createdAt),
+                      QString::fromStdString(item.replyToSender),
+                      QString::fromStdString(item.replyToText));
 }
 
 QString MainWindow::renderMessageHtml(const QString& sender,
                                       const QString& text,
-                                      const QString& createdAt) const {
+                                      const QString& createdAt,
+                                      const QString& replySender,
+                                      const QString& replyText) const {
     const QString initial = sender.isEmpty() ? "?" : sender.left(1).toUpper();
     const QString color = avatarColor(sender);
     const QString safeSender = htmlText(sender);
     const QString safeText = htmlText(text);
     const QString safeTime = htmlText(timePart(createdAt));
+    const QString safeReplySender = htmlText(replySender);
+    const QString safeReplyText = htmlText(replyText);
+    const QString replyBlock =
+        replySender.isEmpty() && replyText.isEmpty()
+            ? QString()
+            : QString(
+                  "<div style='border-left:3px solid #7b8da1;background:#f3f5f8;border-radius:10px;"
+                  "padding:8px 10px;margin:0 0 8px 0;'>"
+                  "<div style='font-weight:700;color:#24303d;font-size:12px;'>%1</div>"
+                  "<div style='color:#5b6672;font-size:12px;line-height:1.3;'>%2</div>"
+                  "</div>")
+                  .arg(safeReplySender, safeReplyText);
 
     return QString(
         "<table width='100%' cellspacing='0' cellpadding='0' style='margin:10px 0;'>"
@@ -991,13 +1023,14 @@ QString MainWindow::renderMessageHtml(const QString& sender,
         "<td align='right' style='color:#7b8da1;font-size:12px;'>%4</td>"
         "</tr>"
         "</table>"
+        "%6"
         "<div style='color:#172331;text-align:left;font-size:15px;line-height:1.35;"
         "padding:4px 8px 2px 8px;'>%5</div>"
         "</div>"
         "</td>"
         "</tr>"
         "</table>"
-    ).arg(color, htmlText(initial), safeSender, safeTime, safeText);
+    ).arg(color, htmlText(initial), safeSender, safeTime, safeText, replyBlock);
 }
 
 QString MainWindow::currentPeer() const {

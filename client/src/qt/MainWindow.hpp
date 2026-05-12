@@ -53,11 +53,17 @@ private:
     void clearTranscriptForPeer(const QString& peer);
     void resetSessionUi();
     void appendSystemMessage(const QString& text);
-    void appendChatMessage(const QString& sender, const QString& text, const QString& createdAt = {});
+    void appendChatMessage(const QString& sender,
+                           const QString& text,
+                           const QString& createdAt = {},
+                           const QString& replySender = {},
+                           const QString& replyText = {});
     void appendHistoryMessage(const client::HistoryItem& item);
     QString renderMessageHtml(const QString& sender,
                               const QString& text,
-                              const QString& createdAt) const;
+                              const QString& createdAt,
+                              const QString& replySender,
+                              const QString& replyText) const;
     QString currentPeer() const;
     void setConnectedState(bool connected);
     void setConnectingState(bool connecting);

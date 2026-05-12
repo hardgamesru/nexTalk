@@ -10,10 +10,14 @@ struct sqlite3;
  * One persisted chat message loaded from SQLite.
  */
 struct StoredMessage {
+    long long id{0};
     std::string createdAt;
     std::string sender;
     std::string recipient;
     std::string text;
+    long long replyToMessageId{0};
+    std::string replyToSender;
+    std::string replyToText;
 };
 
 struct ChatSummary {
@@ -62,6 +66,8 @@ public:
     bool saveMessage(const std::string& sender,
                      const std::string& recipient,
                      const std::string& text,
+                     long long replyToMessageId,
+                     StoredMessage& storedMessage,
                      std::string& error);
     bool fetchHistory(const std::string& user,
                       const std::string& peer,
