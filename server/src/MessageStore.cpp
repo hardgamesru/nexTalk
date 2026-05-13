@@ -1687,6 +1687,7 @@ bool MessageStore::markConversationReadLocked(long long conversationId,
 }
 
 bool MessageStore::deleteMessage(const std::string& requester,
+                                 const std::string& requestedChatId,
                                  long long messageId,
                                  StoredMessage& storedMessage,
                                  std::string& chatId,
@@ -1697,112 +1698,150 @@ bool MessageStore::deleteMessage(const std::string& requester,
     audienceUsernames.clear();
     std::lock_guard<std::mutex> lock(mutex_);
 
-    Statement directLookup(db_,
-                           "SELECT m.sender, m.recipient, COALESCE(m.deleted_at, '') "
-                           "FROM messages m "
-                           "JOIN conversations c ON c.id = m.conversation_id "
-                           "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
-                           error);
-    if (!directLookup) {
-        return false;
-    }
-    sqlite3_bind_int64(directLookup.get(), 1, messageId);
-    sqlite3_bind_text(directLookup.get(), 2, requester.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(directLookup.get(), 3, requester.c_str(), -1, SQLITE_TRANSIENT);
+    long long requestedGroupId = 0;
+    const bool requestedGroupChat = !requestedChatId.empty() && parseGroupChatId(requestedChatId, requestedGroupId);
+    const bool explicitDirectChat = !requestedChatId.empty() && !requestedGroupChat;
 
-    const int directResult = sqlite3_step(directLookup.get());
-    if (directResult == SQLITE_ROW) {
-        const auto* rawSender = sqlite3_column_text(directLookup.get(), 0);
-        const auto* rawRecipient = sqlite3_column_text(directLookup.get(), 1);
-        const auto* rawDeletedAt = sqlite3_column_text(directLookup.get(), 2);
-        const std::string sender = rawSender ? reinterpret_cast<const char*>(rawSender) : "";
-        const std::string recipient = rawRecipient ? reinterpret_cast<const char*>(rawRecipient) : "";
-        const std::string deletedAt = rawDeletedAt ? reinterpret_cast<const char*>(rawDeletedAt) : "";
-        if (sender != requester) {
-            error = "cannot_delete_other_user_message";
-            return false;
-        }
-
-        if (deletedAt.empty()) {
-            Statement update(db_,
-                             "UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ? WHERE id = ?;",
-                             error);
-            if (!update) {
+    if (!requestedGroupChat) {
+        long long directConversationId = 0;
+        if (explicitDirectChat) {
+            if (!findConversationLocked(requester, requestedChatId, directConversationId, error)) {
                 return false;
             }
-            sqlite3_bind_text(update.get(), 1, requester.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(update.get(), 2, messageId);
-            if (sqlite3_step(update.get()) != SQLITE_DONE) {
-                error = lastError(db_);
+            if (directConversationId == 0) {
+                error = "message_not_found";
                 return false;
             }
         }
 
-        Statement directLoad(db_,
-                             "SELECT m.id, m.created_at, m.sender, m.recipient, m.body, "
-                             "       COALESCE(m.reply_to_message_id, 0), "
-                             "       COALESCE(reply.sender, ''), "
-                             "       COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''), "
-                             "       COALESCE(m.forward_from_message_id, 0), "
-                             "       COALESCE(fwd.sender, ''), "
-                             "       COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''), "
-                             "       COALESCE(m.deleted_at, ''), "
-                             "       COALESCE(m.deleted_by, '') "
-                             "FROM messages m "
-                             "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
-                             "LEFT JOIN messages fwd ON fwd.id = m.forward_from_message_id "
-                             "WHERE m.id = ?;",
-                             error);
-        if (!directLoad) {
+        Statement directLookup(db_,
+                               explicitDirectChat
+                                   ? "SELECT m.sender, m.recipient, COALESCE(m.deleted_at, '') "
+                                     "FROM messages m "
+                                     "WHERE m.id = ? AND m.conversation_id = ?;"
+                                   : "SELECT m.sender, m.recipient, COALESCE(m.deleted_at, '') "
+                                     "FROM messages m "
+                                     "JOIN conversations c ON c.id = m.conversation_id "
+                                     "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
+                               error);
+        if (!directLookup) {
             return false;
         }
-        sqlite3_bind_text(directLoad.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(directLoad.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(directLoad.get(), 3, messageId);
-        if (sqlite3_step(directLoad.get()) != SQLITE_ROW) {
+        sqlite3_bind_int64(directLookup.get(), 1, messageId);
+        if (explicitDirectChat) {
+            sqlite3_bind_int64(directLookup.get(), 2, directConversationId);
+        } else {
+            sqlite3_bind_text(directLookup.get(), 2, requester.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(directLookup.get(), 3, requester.c_str(), -1, SQLITE_TRANSIENT);
+        }
+
+        const int directResult = sqlite3_step(directLookup.get());
+        if (directResult == SQLITE_ROW) {
+            const auto* rawSender = sqlite3_column_text(directLookup.get(), 0);
+            const auto* rawRecipient = sqlite3_column_text(directLookup.get(), 1);
+            const auto* rawDeletedAt = sqlite3_column_text(directLookup.get(), 2);
+            const std::string sender = rawSender ? reinterpret_cast<const char*>(rawSender) : "";
+            const std::string recipient = rawRecipient ? reinterpret_cast<const char*>(rawRecipient) : "";
+            const std::string deletedAt = rawDeletedAt ? reinterpret_cast<const char*>(rawDeletedAt) : "";
+            if (sender != requester) {
+                error = "cannot_delete_other_user_message";
+                return false;
+            }
+
+            if (deletedAt.empty()) {
+                Statement update(db_,
+                                 "UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ? WHERE id = ?;",
+                                 error);
+                if (!update) {
+                    return false;
+                }
+                sqlite3_bind_text(update.get(), 1, requester.c_str(), -1, SQLITE_TRANSIENT);
+                sqlite3_bind_int64(update.get(), 2, messageId);
+                if (sqlite3_step(update.get()) != SQLITE_DONE) {
+                    error = lastError(db_);
+                    return false;
+                }
+            }
+
+            Statement directLoad(db_,
+                                 "SELECT m.id, m.created_at, m.sender, m.recipient, m.body, "
+                                 "       COALESCE(m.reply_to_message_id, 0), "
+                                 "       COALESCE(reply.sender, ''), "
+                                 "       COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''), "
+                                 "       COALESCE(m.forward_from_message_id, 0), "
+                                 "       COALESCE(fwd.sender, ''), "
+                                 "       COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''), "
+                                 "       COALESCE(m.deleted_at, ''), "
+                                 "       COALESCE(m.deleted_by, '') "
+                                 "FROM messages m "
+                                 "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
+                                 "LEFT JOIN messages fwd ON fwd.id = m.forward_from_message_id "
+                                 "WHERE m.id = ?;",
+                                 error);
+            if (!directLoad) {
+                return false;
+            }
+            sqlite3_bind_text(directLoad.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(directLoad.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(directLoad.get(), 3, messageId);
+            if (sqlite3_step(directLoad.get()) != SQLITE_ROW) {
+                error = "message_not_found";
+                return false;
+            }
+            auto directText = [&](int column) -> std::string {
+                const auto* value = sqlite3_column_text(directLoad.get(), column);
+                return value ? reinterpret_cast<const char*>(value) : "";
+            };
+            storedMessage.id = sqlite3_column_int64(directLoad.get(), 0);
+            storedMessage.createdAt = directText(1);
+            storedMessage.sender = directText(2);
+            storedMessage.recipient = directText(3);
+            storedMessage.text = directText(4);
+            storedMessage.replyToMessageId = sqlite3_column_int64(directLoad.get(), 5);
+            storedMessage.replyToSender = directText(6);
+            storedMessage.replyToText = directText(7);
+            storedMessage.forwardFromMessageId = sqlite3_column_int64(directLoad.get(), 8);
+            storedMessage.forwardFromSender = directText(9);
+            storedMessage.forwardFromText = directText(10);
+            storedMessage.deletedAt = directText(11);
+            storedMessage.deletedBy = directText(12);
+
+            chatId = explicitDirectChat ? requestedChatId : "";
+            audienceUsernames.push_back(sender);
+            if (recipient != sender) {
+                audienceUsernames.push_back(recipient);
+            }
+            return true;
+        }
+        if (directResult != SQLITE_DONE) {
+            error = lastError(db_);
+            return false;
+        }
+        if (explicitDirectChat) {
             error = "message_not_found";
             return false;
         }
-        auto directText = [&](int column) -> std::string {
-            const auto* value = sqlite3_column_text(directLoad.get(), column);
-            return value ? reinterpret_cast<const char*>(value) : "";
-        };
-        storedMessage.id = sqlite3_column_int64(directLoad.get(), 0);
-        storedMessage.createdAt = directText(1);
-        storedMessage.sender = directText(2);
-        storedMessage.recipient = directText(3);
-        storedMessage.text = directText(4);
-        storedMessage.replyToMessageId = sqlite3_column_int64(directLoad.get(), 5);
-        storedMessage.replyToSender = directText(6);
-        storedMessage.replyToText = directText(7);
-        storedMessage.forwardFromMessageId = sqlite3_column_int64(directLoad.get(), 8);
-        storedMessage.forwardFromSender = directText(9);
-        storedMessage.forwardFromText = directText(10);
-        storedMessage.deletedAt = directText(11);
-        storedMessage.deletedBy = directText(12);
-
-        audienceUsernames.push_back(sender);
-        if (recipient != sender) {
-            audienceUsernames.push_back(recipient);
-        }
-        return true;
-    }
-    if (directResult != SQLITE_DONE) {
-        error = lastError(db_);
-        return false;
     }
 
     Statement groupLookup(db_,
-                          "SELECT m.group_id, m.sender, COALESCE(m.deleted_at, '') "
-                          "FROM group_messages m "
-                          "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
-                          "WHERE m.id = ?;",
+                          requestedGroupChat
+                              ? "SELECT m.group_id, m.sender, COALESCE(m.deleted_at, '') "
+                                "FROM group_messages m "
+                                "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
+                                "WHERE m.id = ? AND m.group_id = ?;"
+                              : "SELECT m.group_id, m.sender, COALESCE(m.deleted_at, '') "
+                                "FROM group_messages m "
+                                "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
+                                "WHERE m.id = ?;",
                           error);
     if (!groupLookup) {
         return false;
     }
     sqlite3_bind_text(groupLookup.get(), 1, requester.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_int64(groupLookup.get(), 2, messageId);
+    if (requestedGroupChat) {
+        sqlite3_bind_int64(groupLookup.get(), 3, requestedGroupId);
+    }
 
     const int groupResult = sqlite3_step(groupLookup.get());
     if (groupResult != SQLITE_ROW) {
@@ -1826,13 +1865,16 @@ bool MessageStore::deleteMessage(const std::string& requester,
 
     if (deletedAt.empty()) {
         Statement update(db_,
-                         "UPDATE group_messages SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ? WHERE id = ?;",
+                         "UPDATE group_messages "
+                         "SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ? "
+                         "WHERE id = ? AND group_id = ?;",
                          error);
         if (!update) {
             return false;
         }
         sqlite3_bind_text(update.get(), 1, requester.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_int64(update.get(), 2, messageId);
+        sqlite3_bind_int64(update.get(), 3, groupId);
         if (sqlite3_step(update.get()) != SQLITE_DONE) {
             error = lastError(db_);
             return false;

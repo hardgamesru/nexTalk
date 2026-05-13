@@ -992,7 +992,8 @@ function requestDeleteMessage() {
   if (!confirm("Удалить сообщение?")) {
     return;
   }
-  sendCommand("delete_message", [String(message.id)]);
+  const chatId = session.selectedPeer || message.chatId || peerForMessage(message);
+  sendCommand("delete_message", [chatId, String(message.id)]);
   closeContextMenu();
 }
 

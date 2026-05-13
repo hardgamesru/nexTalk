@@ -842,13 +842,20 @@ void MessengerServer::handleDeleteMessage(const std::shared_ptr<ClientSession>& 
         return;
     }
 
-    if (message.fields.size() != 1) {
-        sendToSession(session, {common::CommandType::DeleteMessageResult, {"error", "usage: delete_message <message_id>"}});
+    if (message.fields.empty() || message.fields.size() > 2) {
+        sendToSession(session, {common::CommandType::DeleteMessageResult, {"error", "usage: delete_message [chat_id] <message_id>"}});
         return;
     }
 
+    std::string requestedChatId;
     long long messageId = 0;
-    if (!parsePositiveInt64(message.fields[0], messageId)) {
+    if (message.fields.size() == 2) {
+        requestedChatId = message.fields[0];
+        if (requestedChatId.empty() || !parsePositiveInt64(message.fields[1], messageId)) {
+            sendToSession(session, {common::CommandType::DeleteMessageResult, {"error", "invalid_message_id"}});
+            return;
+        }
+    } else if (!parsePositiveInt64(message.fields[0], messageId)) {
         sendToSession(session, {common::CommandType::DeleteMessageResult, {"error", "invalid_message_id"}});
         return;
     }
@@ -858,6 +865,7 @@ void MessengerServer::handleDeleteMessage(const std::shared_ptr<ClientSession>& 
     std::vector<std::string> audienceUsernames;
     std::string storageError;
     if (!messageStore_.deleteMessage(session->username,
+                                     requestedChatId,
                                      messageId,
                                      storedMessage,
                                      resolvedChatId,

@@ -198,6 +198,7 @@ public:
                                 std::vector<std::string>& memberUsernames,
                                 std::string& error);
     bool deleteMessage(const std::string& requester,
+                       const std::string& requestedChatId,
                        long long messageId,
                        StoredMessage& storedMessage,
                        std::string& chatId,
