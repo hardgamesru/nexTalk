@@ -2,6 +2,14 @@
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { CACHE_LIMIT_PER_CHAT, HISTORY_PAGE_SIZE } from "./cacheConfig";
 import {
+  clearAiChatHistory,
+  loadAiChatHistory,
+  openAiChatCacheDb,
+  saveAiChatHistory,
+  type AIAttachment,
+  type AIChatMessage,
+} from "./aiChatCache";
+import {
   loadCachedMessages,
   openMessageCacheDb,
   saveMessageToCache,
@@ -43,8 +51,14 @@ type UserProfile = {
 
 type AuthMode = "choice" | "login" | "register";
 const DELETED_MESSAGE_TEXT = "Сообщение удалено";
+const AI_CHAT_ID = "__ai__";
+const AI_CHAT_NAME = "NexTalk AI";
+const AI_CONTEXT_LIMIT = 24;
+const AI_SYSTEM_PROMPT =
+  "You are NexTalk AI, a helpful assistant embedded in a messenger. Answer clearly and safely. When the user forwards a message, focus on the forwarded content and the user's instruction.";
 
 const bridgeUrl = computed(() => `ws://${window.location.hostname}:5174`);
+const aiServiceUrl = computed(() => `http://${window.location.hostname}:5000`);
 
 const form = reactive({
   host: "127.0.0.1",
@@ -113,6 +127,14 @@ const ui = reactive({
   profileModalLoading: false,
   profileViewMode: "view" as "view" | "edit",
   selectedProfileUsername: "",
+  aiSending: false,
+  aiReplyModalOpen: false,
+  aiReplyLoading: false,
+  aiReplyTargetPeer: "",
+  aiReplySourceMessage: null as ChatMessage | null,
+  aiReplyInstruction: "",
+  aiReplySuggestion: "",
+  aiPendingAttachment: null as AIAttachment | null,
   profileForm: {
     username: "",
     displayName: "",
@@ -128,6 +150,7 @@ const chats = ref<ChatItem[]>([]);
 const chatIndex = reactive<Record<string, ChatItem>>({});
 const messagesByPeer = reactive<Record<string, ChatMessage[]>>({});
 const profilesByUsername = reactive<Record<string, UserProfile>>({});
+const aiMessages = ref<AIChatMessage[]>([]);
 const searchResults = ref<SearchUser[]>([]);
 const pendingSearchQuery = ref("");
 const messagesViewport = ref<HTMLElement | null>(null);
@@ -165,12 +188,26 @@ const filteredChats = computed(() => {
   });
 });
 
+const showAiChatRow = computed(() => {
+  const query = ui.chatFilter.trim().toLowerCase();
+  if (!query) {
+    return true;
+  }
+  return AI_CHAT_NAME.toLowerCase().includes(query) || "assistant ai ollama".includes(query);
+});
+
 const currentMessages = computed(() => {
   const peer = session.selectedPeer;
-  if (!peer) {
+  if (!peer || peer === AI_CHAT_ID) {
     return [] as ChatMessage[];
   }
   return messagesByPeer[peer] ?? [];
+});
+
+const isAiChatSelected = computed(() => session.selectedPeer === AI_CHAT_ID);
+
+const currentAiMessages = computed(() => {
+  return isAiChatSelected.value ? aiMessages.value : [];
 });
 
 const selectedChat = computed(() => {
@@ -179,6 +216,9 @@ const selectedChat = computed(() => {
 });
 
 const selectedChatTitle = computed(() => {
+  if (isAiChatSelected.value) {
+    return AI_CHAT_NAME;
+  }
   if (!selectedChat.value) {
     return "";
   }
@@ -188,11 +228,11 @@ const selectedChatTitle = computed(() => {
 });
 
 const canOpenGroupSettings = computed(() => {
-  return selectedChat.value?.kind === "group";
+  return !isAiChatSelected.value && selectedChat.value?.kind === "group";
 });
 
 const canOpenDirectProfile = computed(() => {
-  return selectedChat.value?.kind === "dm";
+  return !isAiChatSelected.value && selectedChat.value?.kind === "dm";
 });
 
 const profileInitial = computed(() => {
@@ -261,6 +301,282 @@ function computeInitials(displayName: string, username: string) {
     return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
   }
   return source.slice(0, 2).toUpperCase();
+}
+
+function nextAiMessageId() {
+  return `ai-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function loadAiMessagesForUser(username: string) {
+  if (!username) {
+    aiMessages.value = [];
+    return;
+  }
+
+  try {
+    const parsed = await loadAiChatHistory(username);
+    aiMessages.value = parsed
+      .filter((item) => item && typeof item === "object")
+      .map((item) => {
+        const role: AIChatMessage["role"] =
+          item.role === "assistant" || item.role === "error"
+            ? item.role
+            : "user";
+
+        return {
+          id: typeof item.id === "string" ? item.id : nextAiMessageId(),
+          role,
+          content: typeof item.content === "string" ? item.content : "",
+          createdAt: typeof item.createdAt === "string" ? item.createdAt : new Date().toISOString(),
+          attachment:
+            item.attachment &&
+            typeof item.attachment === "object" &&
+            typeof item.attachment.sender === "string" &&
+            typeof item.attachment.text === "string"
+              ? {
+                  sender: item.attachment.sender,
+                  text: item.attachment.text,
+                  sourceChatId: typeof item.attachment.sourceChatId === "string" ? item.attachment.sourceChatId : "",
+                  sourceMessageId:
+                    typeof item.attachment.sourceMessageId === "number" ? item.attachment.sourceMessageId : 0,
+                }
+              : null,
+        };
+      })
+      .filter((item) => item.content.trim() || item.attachment);
+  } catch (error) {
+    console.error("Failed to load AI chat history", error);
+    aiMessages.value = [];
+  }
+}
+
+async function persistAiMessages() {
+  if (!session.currentUser) {
+    return;
+  }
+
+  try {
+    await saveAiChatHistory(session.currentUser, aiMessages.value);
+  } catch (error) {
+    console.error("Failed to persist AI chat history", error);
+  }
+}
+
+async function clearAiChat() {
+  aiMessages.value = [];
+  ui.aiPendingAttachment = null;
+  ui.aiSending = false;
+  ui.messageDraft = "";
+  if (session.currentUser) {
+    try {
+      await clearAiChatHistory(session.currentUser);
+    } catch (error) {
+      console.error("Failed to clear AI chat history", error);
+    }
+  }
+}
+
+function aiPreviewText() {
+  const lastMessage = aiMessages.value[aiMessages.value.length - 1];
+  if (!lastMessage) {
+    return "Local assistant via Ollama";
+  }
+  if (lastMessage.role === "user") {
+    return excerpt(lastMessage.content || (lastMessage.attachment?.text ?? "Forwarded message"), 48);
+  }
+  return excerpt(lastMessage.content || "Ready to help", 48);
+}
+
+function openAiChat() {
+  if (!session.loggedIn) {
+    return;
+  }
+  session.selectedPeer = AI_CHAT_ID;
+  ui.replyTarget = null;
+  ui.contextMenuVisible = false;
+  nextTick(() => {
+    scrollMessagesToBottom();
+  });
+}
+
+function cancelAiAttachment() {
+  ui.aiPendingAttachment = null;
+}
+
+function buildAiAttachment(message: ChatMessage): AIAttachment {
+  const sender = message.forwardFromSender || message.sender;
+  const text = message.forwardFromText || message.text;
+  return {
+    sender,
+    text,
+    sourceChatId: message.chatId || peerForMessage(message),
+    sourceMessageId: message.id,
+  };
+}
+
+function buildAiRequestContent(instruction: string, attachment: AIAttachment | null) {
+  if (!attachment) {
+    return instruction;
+  }
+
+  return `Forwarded message:\nSender: ${attachment.sender}\nText: ${attachment.text}\n\nUser task:\n${instruction}`;
+}
+
+async function requestAiAnswer(messages: { role: string; content: string }[]) {
+  const response = await fetch(`${aiServiceUrl.value}/chat`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ messages }),
+  });
+
+  const data = await response.json().catch(() => null);
+  if (!response.ok || !data || data.status !== "ok" || typeof data.answer !== "string") {
+    const errorText =
+      data && typeof data.error === "string"
+        ? data.error
+        : "AI service is unavailable right now.";
+    throw new Error(errorText);
+  }
+
+  return data.answer.trim();
+}
+
+function aiMessageToProviderMessage(message: AIChatMessage) {
+  const role = message.role === "user" ? "user" : "assistant";
+  return {
+    role,
+    content: buildAiRequestContent(message.content, message.attachment),
+  };
+}
+
+function appendAiMessage(message: AIChatMessage) {
+  aiMessages.value = [...aiMessages.value, message];
+  void persistAiMessages();
+  nextTick(() => {
+    scrollMessagesToBottom();
+  });
+}
+
+async function sendAiMessage() {
+  const instruction = ui.messageDraft.trim();
+  const attachment = ui.aiPendingAttachment;
+  if (!session.loggedIn || ui.aiSending || (!instruction && !attachment)) {
+    return;
+  }
+
+  if (attachment && !instruction) {
+    pushLog("AI instruction is required for the attached message");
+    return;
+  }
+
+  const userMessage: AIChatMessage = {
+    id: nextAiMessageId(),
+    role: "user",
+    content: instruction,
+    createdAt: new Date().toISOString(),
+    attachment,
+  };
+
+  appendAiMessage(userMessage);
+  ui.aiPendingAttachment = null;
+  ui.messageDraft = "";
+  ui.aiSending = true;
+
+  const conversation = aiMessages.value
+    .filter((item) => item.role === "user" || item.role === "assistant")
+    .slice(-AI_CONTEXT_LIMIT)
+    .map(aiMessageToProviderMessage);
+
+  const requestMessages = [
+    { role: "system", content: AI_SYSTEM_PROMPT },
+    ...conversation,
+  ];
+
+  try {
+    const answer = await requestAiAnswer(requestMessages);
+    appendAiMessage({
+      id: nextAiMessageId(),
+      role: "assistant",
+      content: answer,
+      createdAt: new Date().toISOString(),
+      attachment: null,
+    });
+  } catch (error) {
+    appendAiMessage({
+      id: nextAiMessageId(),
+      role: "error",
+      content: error instanceof Error
+        ? error.message
+        : "AI service is unavailable. Check that Ollama and ai_service are running.",
+      createdAt: new Date().toISOString(),
+      attachment: null,
+    });
+  } finally {
+    ui.aiSending = false;
+  }
+}
+
+function openAiReplyModal(message: ChatMessage) {
+  if (isMessageDeleted(message)) {
+    pushLog("Cannot generate a reply for a deleted message");
+    return;
+  }
+
+  ui.aiReplyModalOpen = true;
+  ui.aiReplyLoading = false;
+  ui.aiReplyTargetPeer = session.selectedPeer;
+  ui.aiReplySourceMessage = message;
+  ui.aiReplyInstruction = "Write a short, polite reply that fits this conversation.";
+  ui.aiReplySuggestion = "";
+}
+
+function closeAiReplyModal() {
+  ui.aiReplyModalOpen = false;
+  ui.aiReplyLoading = false;
+  ui.aiReplyTargetPeer = "";
+  ui.aiReplySourceMessage = null;
+  ui.aiReplyInstruction = "";
+  ui.aiReplySuggestion = "";
+}
+
+async function generateAiReply() {
+  const sourceMessage = ui.aiReplySourceMessage;
+  if (!sourceMessage || ui.aiReplyLoading) {
+    return;
+  }
+
+  const attachment = buildAiAttachment(sourceMessage);
+  const instruction = ui.aiReplyInstruction.trim() || "Write a short, polite reply that fits this conversation.";
+
+  ui.aiReplyLoading = true;
+  try {
+    const answer = await requestAiAnswer([
+      {
+        role: "system",
+        content:
+          "You generate short, useful draft replies for messenger chats. Return only the suggested reply text, without explanations or quotes unless the user asks for them.",
+      },
+      {
+        role: "user",
+        content:
+          `Message to reply to:\nSender: ${attachment.sender}\nText: ${attachment.text}\n\nUser instruction:\n${instruction}`,
+      },
+    ]);
+    ui.aiReplySuggestion = answer;
+  } catch (error) {
+    pushLog(error instanceof Error ? `AI Reply error: ${error.message}` : "AI Reply error");
+    ui.aiReplySuggestion = "";
+  } finally {
+    ui.aiReplyLoading = false;
+  }
+}
+
+function insertAiReplyToChat() {
+  if (!ui.aiReplySuggestion.trim()) {
+    return;
+  }
+  ui.messageDraft = ui.aiReplySuggestion.trim();
+  closeAiReplyModal();
 }
 
 function fallbackProfile(username: string): UserProfile {
@@ -714,6 +1030,14 @@ function clearSessionData() {
   ui.profileModalLoading = false;
   ui.profileViewMode = "view";
   ui.selectedProfileUsername = "";
+  ui.aiSending = false;
+  ui.aiReplyModalOpen = false;
+  ui.aiReplyLoading = false;
+  ui.aiReplyTargetPeer = "";
+  ui.aiReplySourceMessage = null;
+  ui.aiReplyInstruction = "";
+  ui.aiReplySuggestion = "";
+  ui.aiPendingAttachment = null;
   ui.profileForm.username = "";
   ui.profileForm.displayName = "";
   ui.profileForm.bio = "";
@@ -732,6 +1056,7 @@ function clearSessionData() {
   clearRecord(historyBatchCountByPeer);
   clearRecord(olderScrollStateByPeer);
   chats.value = [];
+  aiMessages.value = [];
   pendingProfilesBatch.clear();
 }
 
@@ -879,6 +1204,11 @@ function requestLatestHistory(peer: string) {
 }
 
 async function selectPeer(peer: string) {
+  if (peer === AI_CHAT_ID) {
+    openAiChat();
+    return;
+  }
+
   session.selectedPeer = peer;
   ui.replyTarget = null;
   ui.contextMenuVisible = false;
@@ -966,6 +1296,11 @@ function replaceLoadedMessage(peer: string, message: ChatMessage) {
 }
 
 function sendMessage() {
+  if (session.selectedPeer === AI_CHAT_ID) {
+    void sendAiMessage();
+    return;
+  }
+
   const peer = session.selectedPeer;
   const text = ui.messageDraft.trim();
   if (!peer || !text) {
@@ -1111,14 +1446,27 @@ function openContextMenu(event: MouseEvent, message: ChatMessage) {
   const canReply = !isMessageDeleted(message);
   const canForward = !isMessageDeleted(message);
   const canDelete = canDeleteMessage(message);
-  if (!canReply && !canForward && !canDelete) {
+  const canAskAi = !isMessageDeleted(message);
+  if (!canReply && !canForward && !canDelete && !canAskAi) {
     return;
   }
   event.preventDefault();
   ui.contextMenuVisible = true;
+  ui.contextMenuMessageId = message.id;
   ui.contextMenuX = event.clientX;
   ui.contextMenuY = event.clientY;
-  ui.contextMenuMessageId = message.id;
+  nextTick(() => {
+    const menu = document.querySelector<HTMLElement>(".message-menu");
+    if (!menu) {
+      return;
+    }
+
+    const padding = 10;
+    const maxX = Math.max(padding, window.innerWidth - menu.offsetWidth - padding);
+    const maxY = Math.max(padding, window.innerHeight - menu.offsetHeight - padding);
+    ui.contextMenuX = Math.max(padding, Math.min(event.clientX, maxX));
+    ui.contextMenuY = Math.max(padding, Math.min(event.clientY, maxY));
+  });
 }
 
 function beginReply() {
@@ -1141,6 +1489,32 @@ function beginForward() {
     ui.forwardRecipient = "";
     ui.forwardDraft = "";
   }
+  closeContextMenu();
+}
+
+function beginAiReply() {
+  const message = activeContextMessage.value;
+  if (message) {
+    openAiReplyModal(message);
+  }
+  closeContextMenu();
+}
+
+function beginAskAi() {
+  const message = activeContextMessage.value;
+  if (!message) {
+    closeContextMenu();
+    return;
+  }
+
+  if (isMessageDeleted(message)) {
+    pushLog("Cannot analyze a deleted message");
+    closeContextMenu();
+    return;
+  }
+
+  ui.aiPendingAttachment = buildAiAttachment(message);
+  openAiChat();
   closeContextMenu();
 }
 
@@ -1337,7 +1711,7 @@ function onMessagesScroll() {
   }
   const distance = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
   stickMessagesToBottom.value = distance < 28;
-  if (viewport.scrollTop < 80 && session.selectedPeer) {
+  if (viewport.scrollTop < 80 && session.selectedPeer && session.selectedPeer !== AI_CHAT_ID) {
     loadOlderMessages(session.selectedPeer);
   }
 }
@@ -1448,9 +1822,11 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         session.currentUser = authCredentials?.username || form.username.trim();
         try {
           await openMessageCacheDb(session.currentUser);
+          await openAiChatCacheDb(session.currentUser);
         } catch (error) {
-          console.error("Failed to open message cache", error);
+          console.error("Failed to open local caches", error);
         }
+        await loadAiMessagesForUser(session.currentUser);
         requestProfile(session.currentUser);
         fetchChats();
       } else {
@@ -1766,7 +2142,20 @@ async function handleProtocolMessage(message: ProtocolMessage) {
 watch(
   () => currentMessages.value.length,
   () => {
-    if (stickMessagesToBottom.value) {
+    if (stickMessagesToBottom.value && !isAiChatSelected.value) {
+      nextTick(() => {
+        if (messagesViewport.value) {
+          messagesViewport.value.scrollTop = messagesViewport.value.scrollHeight;
+        }
+      });
+    }
+  },
+);
+
+watch(
+  () => aiMessages.value.length,
+  () => {
+    if (stickMessagesToBottom.value && isAiChatSelected.value) {
       nextTick(() => {
         if (messagesViewport.value) {
           messagesViewport.value.scrollTop = messagesViewport.value.scrollHeight;
@@ -1808,23 +2197,41 @@ watch(
           <button class="small" @click="openAddChat" :disabled="!session.loggedIn">New</button>
         </div>
         <input v-model="ui.chatFilter" placeholder="Search chats" />
-        <div class="chat-list">
-          <div
-            v-for="chat in filteredChats"
-            :key="chat.peerId"
-            class="chat-row"
-            :class="{ active: session.selectedPeer === chat.peerId }"
-            @click="selectPeer(chat.peerId)"
-          >
-            <div class="chat-row-main">
-              <strong>{{ chatDisplayName(chat) }}</strong>
-              <span class="preview">
-                {{ chatPreview(chat) }}
-              </span>
+        <div class="chat-list-shell">
+          <div class="chat-list">
+            <div
+              v-for="chat in filteredChats"
+              :key="chat.peerId"
+              class="chat-row"
+              :class="{ active: session.selectedPeer === chat.peerId }"
+              @click="selectPeer(chat.peerId)"
+            >
+              <div class="chat-row-main">
+                <strong>{{ chatDisplayName(chat) }}</strong>
+                <span class="preview">
+                  {{ chatPreview(chat) }}
+                </span>
+              </div>
+              <div class="chat-row-actions">
+                <span v-if="chat.unreadCount > 0 && session.selectedPeer !== chat.peerId" class="unread-dot"></span>
+                <button v-if="chat.kind === 'dm'" class="chat-delete" @click.stop="deleteChat(chat.peerId)">x</button>
+              </div>
             </div>
-            <div class="chat-row-actions">
-              <span v-if="chat.unreadCount > 0 && session.selectedPeer !== chat.peerId" class="unread-dot"></span>
-              <button v-if="chat.kind === 'dm'" class="chat-delete" @click.stop="deleteChat(chat.peerId)">x</button>
+          </div>
+          <div v-if="showAiChatRow" class="ai-chat-block">
+            <div class="ai-chat-block-title">Assistant</div>
+            <div
+              class="chat-row ai-chat-row"
+              :class="{ active: session.selectedPeer === AI_CHAT_ID }"
+              @click="selectPeer(AI_CHAT_ID)"
+            >
+              <div class="chat-row-main">
+                <strong>{{ AI_CHAT_NAME }}</strong>
+                <span class="preview">{{ aiPreviewText() }}</span>
+              </div>
+              <div class="chat-row-actions">
+                <span class="ai-pill">AI</span>
+              </div>
             </div>
           </div>
         </div>
@@ -1837,25 +2244,63 @@ watch(
           <h2>{{ session.selectedPeer ? selectedChatTitle : "Привет" }}</h2>
           <p>
             {{
-              session.selectedPeer
+              isAiChatSelected
+                ? "Local assistant for analysis, summaries, translations and reply drafting"
+                : session.selectedPeer
                 ? (session.loggedIn ? `Signed in as ${session.currentUser}` : "Not signed in")
                 : "Выберите чат слева"
             }}
           </p>
         </div>
         <div class="top-actions">
+          <button v-if="isAiChatSelected" class="small" @click="clearAiChat">Clear</button>
           <button v-if="canOpenDirectProfile && selectedChat" class="small" @click="openUserProfile(selectedChat.peerId)">Profile</button>
           <button v-if="canOpenGroupSettings" class="small" @click="openGroupSettings">People</button>
         </div>
       </header>
 
       <section ref="messagesViewport" class="messages" @scroll="onMessagesScroll">
-        <div v-if="session.selectedPeer && loadingOlderByPeer[session.selectedPeer]" class="history-loading">
+        <div v-if="session.selectedPeer && !isAiChatSelected && loadingOlderByPeer[session.selectedPeer]" class="history-loading">
           Loading older messages...
         </div>
         <div v-if="!session.selectedPeer" class="empty-chat">
           <p>Выберите чат в списке слева, чтобы увидеть переписку.</p>
         </div>
+        <template v-else-if="isAiChatSelected">
+          <div v-if="currentAiMessages.length === 0" class="empty-chat">
+            <p>Open NexTalk AI and ask a question, or use Ask AI on any message.</p>
+          </div>
+          <template v-for="message in currentAiMessages" :key="message.id">
+            <article
+              class="message-row"
+              :class="{
+                own: message.role === 'user',
+                'ai-assistant-row': message.role !== 'user',
+                'ai-error-row': message.role === 'error',
+              }"
+            >
+              <div
+                class="avatar"
+                :class="{ 'ai-avatar': message.role !== 'user' }"
+                :style="message.role === 'user' ? { background: currentUserAvatarColor } : undefined"
+              >
+                {{ message.role === "user" ? profileInitial : "AI" }}
+              </div>
+              <div class="bubble" :class="{ 'ai-bubble': message.role !== 'user', 'ai-error-bubble': message.role === 'error' }">
+                <div class="meta">
+                  <strong>{{ message.role === "user" ? getProfileDisplayName(session.currentUser) : AI_CHAT_NAME }}</strong>
+                  <small>{{ formatServerTime(message.createdAt) }}</small>
+                </div>
+                <div v-if="message.attachment" class="ai-attachment-card">
+                  <span class="ai-attachment-title">Forwarded message</span>
+                  <strong>{{ getProfileDisplayName(message.attachment.sender) }}</strong>
+                  <span>{{ excerpt(message.attachment.text, 220) }}</span>
+                </div>
+                <p v-if="message.content">{{ message.content }}</p>
+              </div>
+            </article>
+          </template>
+        </template>
         <template v-for="(message, idx) in currentMessages" :key="message.id || idx">
           <article
             class="message-row"
@@ -1903,6 +2348,8 @@ watch(
         >
           <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginReply">Reply</button>
           <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginForward">Forward</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginAiReply">AI Reply</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginAskAi">Ask AI</button>
           <button
             v-if="activeContextMessage && canDeleteMessage(activeContextMessage)"
             class="message-menu-item danger-text"
@@ -1915,23 +2362,45 @@ watch(
 
       <footer class="composer">
         <div class="composer-main">
-          <div v-if="ui.replyTarget" class="reply-draft">
+          <div v-if="ui.replyTarget && !isAiChatSelected" class="reply-draft">
             <div class="reply-draft-copy">
               <strong>{{ getProfileDisplayName(ui.replyTarget.sender) }}</strong>
               <span>{{ excerpt(ui.replyTarget.text) }}</span>
             </div>
             <button class="reply-cancel" @click="cancelReply">x</button>
           </div>
+          <div v-if="isAiChatSelected && ui.aiPendingAttachment" class="reply-draft ai-pending-draft">
+            <div class="reply-draft-copy">
+              <small class="ai-attachment-title">Forwarded message</small>
+              <strong>{{ getProfileDisplayName(ui.aiPendingAttachment.sender) }}</strong>
+              <span>{{ excerpt(ui.aiPendingAttachment.text, 220) }}</span>
+            </div>
+            <button class="reply-cancel" @click="cancelAiAttachment">x</button>
+          </div>
           <div class="composer-row">
             <input
               v-model="ui.messageDraft"
               type="text"
-              placeholder="Write a message"
-              :disabled="!session.selectedPeer || !session.loggedIn"
+              :placeholder="
+                isAiChatSelected && ui.aiPendingAttachment
+                  ? 'What should AI do with this message?'
+                  : isAiChatSelected
+                    ? 'Ask NexTalk AI anything'
+                    : 'Write a message'
+              "
+              :disabled="(!session.selectedPeer || !session.loggedIn) || ui.aiSending"
               @keydown.enter.prevent="sendMessage"
             />
-            <button class="primary" @click="sendMessage" :disabled="!ui.messageDraft.trim() || !session.selectedPeer">
-              Send
+            <button
+              class="primary"
+              @click="sendMessage"
+              :disabled="
+                !session.selectedPeer ||
+                (!ui.messageDraft.trim() && !(isAiChatSelected && !ui.aiPendingAttachment)) ||
+                ui.aiSending
+              "
+            >
+              {{ isAiChatSelected && ui.aiSending ? "Thinking..." : "Send" }}
             </button>
           </div>
         </div>
@@ -2060,6 +2529,40 @@ watch(
         </div>
         <div class="modal-actions">
           <button class="primary" @click="submitForward" :disabled="!ui.forwardRecipient">Send</button>
+        </div>
+      </div>
+    </section>
+
+    <section v-if="ui.aiReplyModalOpen && ui.aiReplySourceMessage" class="modal-wrap" @click.self="closeAiReplyModal">
+      <div class="modal ai-reply-modal">
+        <button class="modal-close" type="button" @click="closeAiReplyModal" aria-label="Close">x</button>
+        <h3>AI Reply</h3>
+        <p>Generate a reply draft for the current chat without opening the full AI conversation.</p>
+        <div class="forward-preview-card">
+          <span class="ai-attachment-title">Source message</span>
+          <strong>{{ getProfileDisplayName(buildAiAttachment(ui.aiReplySourceMessage).sender) }}</strong>
+          <span>{{ excerpt(buildAiAttachment(ui.aiReplySourceMessage).text, 220) }}</span>
+        </div>
+        <div class="forward-compose">
+          <label>Instruction</label>
+          <textarea
+            v-model="ui.aiReplyInstruction"
+            rows="3"
+            :disabled="ui.aiReplyLoading"
+            placeholder="Describe the tone or purpose of the reply"
+          ></textarea>
+        </div>
+        <div class="modal-actions ai-reply-top-actions">
+          <button class="primary ai-reply-generate-btn" @click="generateAiReply" :disabled="ui.aiReplyLoading">
+            {{ ui.aiReplyLoading ? "Generating..." : "Generate" }}
+          </button>
+        </div>
+        <div class="ai-reply-suggestion">
+          <span class="ai-attachment-title">Suggested reply</span>
+          <p>{{ ui.aiReplySuggestion || "Generated reply will appear here." }}</p>
+        </div>
+        <div class="modal-actions">
+          <button class="small" @click="insertAiReplyToChat" :disabled="!ui.aiReplySuggestion.trim()">Insert to chat</button>
         </div>
       </div>
     </section>
