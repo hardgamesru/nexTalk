@@ -17,33 +17,17 @@
 #include <unistd.h>
 #include <utility>
 
+#include <openssl/err.h>
+#include <openssl/ssl.h>
+
 namespace {
     constexpr int kBacklog = 16;
     constexpr std::size_t kMaxLineLength = 8192;
     constexpr int kDefaultHistoryLimit = 20;
     constexpr int kMaxHistoryLimit = 100;
     constexpr int kMaxUserSearchResults = 20;
-
-    // send() не обязан отправить всю строку за один вызов. Поэтому sendAll
-    // повторяет отправку, пока все байты протокольного сообщения не уйдут в TCP.
-    bool sendAll(int socket, const std::string& data) {
-        std::size_t sent = 0;
-
-        while (sent < data.size()) {
-            const ssize_t result = ::send(socket, data.data() + sent, data.size() - sent, 0);
-            if (result < 0 && errno == EINTR) {
-                continue;
-            }
-
-            if (result <= 0) {
-                return false;
-            }
-
-            sent += static_cast<std::size_t>(result);
-        }
-
-        return true;
-    }
+    constexpr const char* kServerCertificatePath = "certs/server.crt";
+    constexpr const char* kServerPrivateKeyPath = "certs/server.key";
 
     // Преобразует sockaddr_in из accept() в читаемый вид для логов.
     std::string sockaddrToString(const sockaddr_in& address) {
@@ -163,6 +147,17 @@ namespace {
         }
         return parsePositiveInt64(chatId.substr(6), groupId);
     }
+
+    std::string lastOpenSslError() {
+        const unsigned long errorCode = ERR_get_error();
+        if (errorCode == 0) {
+            return "unknown OpenSSL error";
+        }
+
+        char buffer[256] = {};
+        ERR_error_string_n(errorCode, buffer, sizeof(buffer));
+        return buffer;
+    }
 }
 
 MessengerServer::MessengerServer(int port,
@@ -180,34 +175,69 @@ MessengerServer::~MessengerServer() {
 }
 
 bool MessengerServer::start() {
+    auto failStart = [&](const std::string& message) {
+        std::cerr << message << '\n';
+        if (listenSocket_ >= 0) {
+            ::close(listenSocket_);
+            listenSocket_ = -1;
+        }
+        if (sslContext_) {
+            SSL_CTX_free(sslContext_);
+            sslContext_ = nullptr;
+        }
+        messageStore_.close();
+        if (logFile_.is_open()) {
+            logFile_.close();
+        }
+        return false;
+    };
+
     // Лог открывается в режиме append: события сохраняются между запусками
     // сервера, что требуется в задании преподавателя.
     logFile_.open(logPath_, std::ios::app);
     if (!logFile_) {
-        std::cerr << "Cannot open log file: " << logPath_ << '\n';
-        return false;
+        return failStart("Cannot open log file: " + logPath_);
     }
 
     std::string storageError;
     if (!messageStore_.open(dbPath_, storageError)) {
-        std::cerr << "Cannot open database: " << dbPath_ << ": " << storageError << '\n';
-        return false;
+        return failStart("Cannot open database: " + dbPath_ + ": " + storageError);
+    }
+
+    OPENSSL_init_ssl(0, nullptr);
+    sslContext_ = SSL_CTX_new(TLS_server_method());
+    if (!sslContext_) {
+        return failStart("Cannot create TLS context: " + lastOpenSslError());
+    }
+
+    SSL_CTX_set_min_proto_version(sslContext_, TLS1_2_VERSION);
+
+    if (SSL_CTX_use_certificate_file(sslContext_, kServerCertificatePath, SSL_FILETYPE_PEM) != 1) {
+        return failStart(
+            "Cannot load TLS certificate " + std::string(kServerCertificatePath) + ": " + lastOpenSslError());
+    }
+
+    if (SSL_CTX_use_PrivateKey_file(sslContext_, kServerPrivateKeyPath, SSL_FILETYPE_PEM) != 1) {
+        return failStart(
+            "Cannot load TLS private key " + std::string(kServerPrivateKeyPath) + ": " + lastOpenSslError());
+    }
+
+    if (SSL_CTX_check_private_key(sslContext_) != 1) {
+        return failStart("TLS certificate/private key mismatch: " + lastOpenSslError());
     }
 
     // Создаем TCP/IPv4 socket. Это низкоуровневый дескриптор, через который
     // ОС будет принимать входящие сетевые подключения.
     listenSocket_ = ::socket(AF_INET, SOCK_STREAM, 0);
     if (listenSocket_ < 0) {
-        std::cerr << "socket failed: " << std::strerror(errno) << '\n';
-        return false;
+        return failStart("socket failed: " + std::string(std::strerror(errno)));
     }
 
     // SO_REUSEADDR позволяет быстро перезапустить сервер на том же порту после
     // остановки, не дожидаясь, пока ОС полностью освободит старое соединение.
     int enabled = 1;
     if (::setsockopt(listenSocket_, SOL_SOCKET, SO_REUSEADDR, &enabled, sizeof(enabled)) < 0) {
-        std::cerr << "setsockopt failed: " << std::strerror(errno) << '\n';
-        return false;
+        return failStart("setsockopt failed: " + std::string(std::strerror(errno)));
     }
 
     sockaddr_in address{};
@@ -215,29 +245,27 @@ bool MessengerServer::start() {
     address.sin_port = htons(static_cast<uint16_t>(port_));
 
     if (::inet_pton(AF_INET, bindAddress_.c_str(), &address.sin_addr) != 1) {
-        std::cerr << "Invalid bind address: " << bindAddress_ << '\n';
-        return false;
+        return failStart("Invalid bind address: " + bindAddress_);
     }
 
     // bind связывает socket с конкретным IP-адресом и портом.
     // 127.0.0.1 подходит для локального режима, 0.0.0.0 - для сетевого.
     if (::bind(listenSocket_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) < 0) {
-        std::cerr << "bind failed: " << std::strerror(errno) << '\n';
-        return false;
+        return failStart("bind failed: " + std::string(std::strerror(errno)));
     }
 
     // После listen socket становится "слушающим": ОС начинает ставить входящие
     // подключения в очередь, откуда сервер забирает их через accept().
     if (::listen(listenSocket_, kBacklog) < 0) {
-        std::cerr << "listen failed: " << std::strerror(errno) << '\n';
-        return false;
+        return failStart("listen failed: " + std::string(std::strerror(errno)));
     }
 
     running_ = true;
     logEvent("server_started port=" + std::to_string(port_) +
              " bind=" + bindAddress_ +
-             " db=" + dbPath_);
-    std::cout << "NexTalk server listening on " << bindAddress_ << ':' << port_ << '\n';
+             " db=" + dbPath_ +
+             " tls=enabled");
+    std::cout << "NexTalk TLS server listening on " << bindAddress_ << ':' << port_ << '\n';
     return true;
 }
 
@@ -289,6 +317,22 @@ void MessengerServer::run(const std::function<bool()>& shouldStop) {
         auto session = std::make_shared<ClientSession>();
         session->socket = clientSocket;
         session->peer = sockaddrToString(clientAddress);
+        session->ssl = SSL_new(sslContext_);
+        if (!session->ssl) {
+            std::cerr << "SSL_new failed for " << session->peer << ": " << lastOpenSslError() << '\n';
+            ::close(clientSocket);
+            continue;
+        }
+
+        SSL_set_fd(session->ssl, clientSocket);
+        if (SSL_accept(session->ssl) != 1) {
+            std::cerr << "TLS handshake failed for " << session->peer << ": " << lastOpenSslError() << '\n';
+            SSL_free(session->ssl);
+            session->ssl = nullptr;
+            ::close(clientSocket);
+            continue;
+        }
+
         logEvent("client_connected peer=" + session->peer);
 
         {
@@ -354,6 +398,11 @@ void MessengerServer::stop() {
         sendToSession(session, {common::CommandType::Info, {"server is shutting down"}});
         closeSessionSocket(session);
     }
+
+    if (sslContext_) {
+        SSL_CTX_free(sslContext_);
+        sslContext_ = nullptr;
+    }
 }
 
 bool MessengerServer::sendToSession(const std::shared_ptr<ClientSession>& session,
@@ -368,37 +417,62 @@ bool MessengerServer::sendToSession(const std::shared_ptr<ClientSession>& sessio
     // важно, когда разные клиентские потоки одновременно отправляют события
     // одному и тому же пользователю.
     std::lock_guard<std::mutex> lock(session->writeMutex);
-    if (session->socket < 0) {
+    if (session->socket < 0 || !session->ssl) {
         return false;
     }
 
-    return sendAll(session->socket, line);
+    std::size_t sent = 0;
+    while (sent < line.size()) {
+        const int result = SSL_write(
+            session->ssl,
+            line.data() + sent,
+            static_cast<int>(line.size() - sent));
+        if (result > 0) {
+            sent += static_cast<std::size_t>(result);
+            continue;
+        }
+
+        const int sslError = SSL_get_error(session->ssl, result);
+        if (sslError == SSL_ERROR_WANT_READ || sslError == SSL_ERROR_WANT_WRITE) {
+            continue;
+        }
+
+        return false;
+    }
+
+    return true;
 }
 
-bool MessengerServer::readLine(int socket, std::string& line) {
+bool MessengerServer::readLine(const std::shared_ptr<ClientSession>& session, std::string& line) {
     line.clear();
     char ch = '\0';
 
     // TCP - поток байтов, он не хранит границы сообщений. Мы читаем по одному
     // байту до '\n', потому что наш протокол задает "одно сообщение = одна строка".
     while (line.size() < kMaxLineLength) {
-        const ssize_t result = ::recv(socket, &ch, 1, 0);
-        if (result == 0) {
+        if (!session || !session->ssl) {
             return false;
         }
 
-        if (result < 0) {
-            if (errno == EINTR) {
-                continue;
+        const int result = SSL_read(session->ssl, &ch, 1);
+        if (result > 0) {
+            line += ch;
+            if (ch == '\n') {
+                return true;
             }
+            continue;
+        }
 
+        const int sslError = SSL_get_error(session->ssl, result);
+        if (sslError == SSL_ERROR_WANT_READ || sslError == SSL_ERROR_WANT_WRITE) {
+            continue;
+        }
+
+        if (sslError == SSL_ERROR_ZERO_RETURN) {
             return false;
         }
 
-        line += ch;
-        if (ch == '\n') {
-            return true;
-        }
+        return false;
     }
 
     return false;
@@ -408,7 +482,7 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
     sendToSession(session, {common::CommandType::Info, {"welcome to NexTalk"}});
 
     std::string line;
-    while (running_ && session->active && readLine(session->socket, line)) {
+    while (running_ && session->active && readLine(session, line)) {
         common::ProtocolMessage message;
 
         // Все входящие строки проходят через общий парсер протокола из common.
@@ -1542,6 +1616,10 @@ void MessengerServer::closeSessionSocket(const std::shared_ptr<ClientSession>& s
     }
 
     std::lock_guard<std::mutex> lock(session->writeMutex);
+    if (session->ssl) {
+        SSL_free(session->ssl);
+        session->ssl = nullptr;
+    }
     if (session->socket >= 0) {
         // shutdown будит поток, который мог ждать данные в recv(). close
         // освобождает файловый дескриптор в ОС.

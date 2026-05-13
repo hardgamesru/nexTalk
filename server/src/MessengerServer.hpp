@@ -10,6 +10,8 @@
 #include <unordered_map>
 #include <vector>
 
+#include <openssl/ssl.h>
+
 #include "common/Protocol.hpp"
 #include "MessageStore.hpp"
 
@@ -59,6 +61,9 @@ private:
         // Защищает запись в socket этой сессии, чтобы два потока не смешали
         // свои сообщения в одном TCP-потоке байтов.
         std::mutex writeMutex;
+
+        // TLS-состояние соединения поверх обычного TCP socket.
+        SSL* ssl{nullptr};
     };
 
     /**
@@ -70,7 +75,7 @@ private:
     /**
      * Читает из TCP-сокета одну строку до '\n'.
      */
-    bool readLine(int socket, std::string& line);
+    bool readLine(const std::shared_ptr<ClientSession>& session, std::string& line);
 
     /**
      * Основной цикл обработки одного клиента. Выполняется в отдельном потоке.
@@ -189,6 +194,7 @@ private:
     std::ofstream logFile_;
     std::mutex logMutex_;
     MessageStore messageStore_;
+    SSL_CTX* sslContext_{nullptr};
 
     // Таблица "имя пользователя -> активная сессия". По ней сервер ищет, куда
     // доставлять личные сообщения. Доступ защищен clientsMutex_.

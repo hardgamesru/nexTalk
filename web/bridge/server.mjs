@@ -1,4 +1,4 @@
-import net from "node:net";
+import tls from "node:tls";
 import { WebSocketServer } from "ws";
 
 const BRIDGE_PORT = Number.parseInt(process.env.BRIDGE_PORT ?? "5174", 10);
@@ -31,7 +31,12 @@ wss.on("connection", (ws) => {
       return;
     }
 
-    tcp = new net.Socket();
+    tcp = tls.connect({
+      host,
+      port,
+      // Accept the self-signed certificate in the local teaching setup only.
+      rejectUnauthorized: false,
+    });
     tcp.setNoDelay(true);
 
     tcp.on("connect", () => {
@@ -59,7 +64,6 @@ wss.on("connection", (ws) => {
       tcp = null;
     });
 
-    tcp.connect(port, host);
   };
 
   sendJson(ws, { type: "ready", bridgePort: BRIDGE_PORT });
