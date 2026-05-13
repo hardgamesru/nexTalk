@@ -32,6 +32,7 @@ type SearchUser = {
 };
 
 type AuthMode = "choice" | "login" | "register";
+const DELETED_MESSAGE_TEXT = "Сообщение удалено";
 
 const bridgeUrl = computed(() => `ws://${window.location.hostname}:5174`);
 
@@ -168,6 +169,10 @@ const forwardableChats = computed(() => {
   return chats.value.filter((chat) => !(chat.kind === "dm" && chat.peer === session.currentUser));
 });
 
+const activeContextMessage = computed(() => {
+  return currentMessages.value.find((item) => item.id === ui.contextMenuMessageId) ?? null;
+});
+
 function pushLog(text: string) {
   const stamp = new Date().toLocaleString();
   ui.logs.push(`[${stamp}] ${text}`);
@@ -225,7 +230,21 @@ function parseChatMessage(fields: string[], offset = 0) {
     forwardFromMessageId: forwardFromMessageId && Number.isFinite(forwardFromMessageId) ? forwardFromMessageId : null,
     forwardFromSender: fields[offset + 10] ?? "",
     forwardFromText: fields[offset + 11] ?? "",
+    deletedAt: fields[offset + 12] ?? "",
+    deletedBy: fields[offset + 13] ?? "",
   } as ChatMessage;
+}
+
+function isMessageDeleted(message: ChatMessage) {
+  return Boolean(message.deletedAt);
+}
+
+function displayedMessageText(message: ChatMessage) {
+  return isMessageDeleted(message) ? DELETED_MESSAGE_TEXT : message.text;
+}
+
+function canDeleteMessage(message: ChatMessage) {
+  return message.sender === session.currentUser && !isMessageDeleted(message);
 }
 
 function peerForMessage(message: ChatMessage) {
@@ -639,11 +658,26 @@ function updateChatPreviewFromMessage(peer: string, message: ChatMessage, unread
 
   existingChat.lastAt = message.createdAt;
   existingChat.lastSender = message.sender;
-  existingChat.lastText = message.text;
+  existingChat.lastText = displayedMessageText(message);
   if (typeof unreadCount === "number") {
     existingChat.unreadCount = unreadCount;
   }
   sortChats();
+  return true;
+}
+
+function replaceLoadedMessage(peer: string, message: ChatMessage) {
+  const arr = messagesByPeer[peer];
+  if (!arr) {
+    return false;
+  }
+
+  const existingIndex = arr.findIndex((item) => item.id === message.id);
+  if (existingIndex < 0) {
+    return false;
+  }
+
+  arr.splice(existingIndex, 1, message);
   return true;
 }
 
@@ -663,6 +697,19 @@ function sendMessage() {
   ui.messageDraft = "";
   ui.replyTarget = null;
   ui.contextMenuVisible = false;
+}
+
+function requestDeleteMessage() {
+  const message = activeContextMessage.value;
+  if (!message || !canDeleteMessage(message)) {
+    closeContextMenu();
+    return;
+  }
+  if (!confirm("Удалить сообщение?")) {
+    return;
+  }
+  sendCommand("delete_message", [String(message.id)]);
+  closeContextMenu();
 }
 
 function fetchChats() {
@@ -776,6 +823,12 @@ function closeContextMenu() {
 }
 
 function openContextMenu(event: MouseEvent, message: ChatMessage) {
+  const canReply = !isMessageDeleted(message);
+  const canForward = !isMessageDeleted(message);
+  const canDelete = canDeleteMessage(message);
+  if (!canReply && !canForward && !canDelete) {
+    return;
+  }
   event.preventDefault();
   ui.contextMenuVisible = true;
   ui.contextMenuX = event.clientX;
@@ -784,8 +837,8 @@ function openContextMenu(event: MouseEvent, message: ChatMessage) {
 }
 
 function beginReply() {
-  const message = currentMessages.value.find((item) => item.id === ui.contextMenuMessageId) ?? null;
-  if (message) {
+  const message = activeContextMessage.value;
+  if (message && !isMessageDeleted(message)) {
     ui.replyTarget = message;
   }
   closeContextMenu();
@@ -796,8 +849,8 @@ function cancelReply() {
 }
 
 function beginForward() {
-  const message = currentMessages.value.find((item) => item.id === ui.contextMenuMessageId) ?? null;
-  if (message) {
+  const message = activeContextMessage.value;
+  if (message && !isMessageDeleted(message)) {
     ui.forwardTarget = message;
     ui.showForwardPicker = true;
     ui.forwardRecipient = "";
@@ -1174,6 +1227,31 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       }
       break;
     }
+    case "delete_message_result":
+      if (a !== "ok") {
+        pushLog(`Delete message error: ${b}`);
+      }
+      break;
+    case "message_deleted": {
+      const deletedMessage = parseChatMessage(message.fields);
+      if (!deletedMessage) {
+        pushLog("Deleted message parse error");
+        break;
+      }
+
+      const peer = deletedMessage.chatId || peerForMessage(deletedMessage);
+      const updated = replaceLoadedMessage(peer, deletedMessage);
+      if (updated) {
+        await persistSingleMessage(peer, deletedMessage);
+      }
+      if (ui.replyTarget?.id === deletedMessage.id) {
+        ui.replyTarget = null;
+      }
+      if (ui.forwardTarget?.id === deletedMessage.id) {
+        cancelForward();
+      }
+      break;
+    }
     case "history_result": {
       const resultPeer = message.fields[2] ?? "";
       const resultMode = message.fields[3] === "older" ? "older" : "latest";
@@ -1459,7 +1537,7 @@ watch(
                 <small>{{ formatServerTime(message.createdAt) }}</small>
               </div>
               <button
-                v-if="message.forwardFromMessageId"
+                v-if="message.forwardFromMessageId && !isMessageDeleted(message)"
                 class="forward-snippet"
                 type="button"
                 @click="openForwardPreview(message)"
@@ -1468,7 +1546,7 @@ watch(
                 <span>{{ excerpt(message.forwardFromText || message.text) }}</span>
               </button>
               <button
-                v-if="message.replyToMessageId"
+                v-if="message.replyToMessageId && !isMessageDeleted(message)"
                 class="reply-snippet"
                 type="button"
                 @click="jumpToMessage(message.replyToMessageId)"
@@ -1476,7 +1554,9 @@ watch(
                 <strong>{{ message.replyToSender || "Message" }}</strong>
                 <span>{{ excerpt(message.replyToText || "Deleted message") }}</span>
               </button>
-              <p v-if="message.text">{{ message.text }}</p>
+              <p v-if="displayedMessageText(message)" :class="{ 'deleted-copy': isMessageDeleted(message) }">
+                {{ displayedMessageText(message) }}
+              </p>
             </div>
           </article>
         </template>
@@ -1486,8 +1566,15 @@ watch(
           class="message-menu"
           :style="{ left: `${ui.contextMenuX}px`, top: `${ui.contextMenuY}px` }"
         >
-          <button class="message-menu-item" @click.stop="beginReply">Reply</button>
-          <button class="message-menu-item" @click.stop="beginForward">Forward</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginReply">Reply</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginForward">Forward</button>
+          <button
+            v-if="activeContextMessage && canDeleteMessage(activeContextMessage)"
+            class="message-menu-item danger-text"
+            @click.stop="requestDeleteMessage"
+          >
+            Delete
+          </button>
         </div>
       </section>
 

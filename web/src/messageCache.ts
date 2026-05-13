@@ -11,6 +11,8 @@ export type ChatMessage = {
   forwardFromMessageId: number | null;
   forwardFromSender: string;
   forwardFromText: string;
+  deletedAt: string;
+  deletedBy: string;
 };
 
 type CachedMessageRecord = ChatMessage & {
@@ -117,7 +119,11 @@ export async function loadCachedMessages(username: string, peer: string): Promis
   const records = await waitForRequest(index.getAll(peerRange(peer))) as CachedMessageRecord[];
   return records
     .sort((left, right) => left.id - right.id)
-    .map(({ cacheKey: _cacheKey, owner: _owner, peer: _peer, ...message }) => message);
+    .map(({ cacheKey: _cacheKey, owner: _owner, peer: _peer, ...message }) => ({
+      ...message,
+      deletedAt: message.deletedAt ?? "",
+      deletedBy: message.deletedBy ?? "",
+    }));
 }
 
 export async function trimCachedMessages(username: string, peer: string, limit: number): Promise<void> {

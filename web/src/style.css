@@ -720,6 +720,15 @@ button:disabled {
   background: #eef1f4;
 }
 
+.message-menu-item.danger-text {
+  color: #8c3636;
+}
+
+.deleted-copy {
+  color: var(--muted);
+  font-style: italic;
+}
+
 .modal {
   position: relative;
   width: min(450px, calc(100vw - 20px));

@@ -21,6 +21,8 @@ struct StoredMessage {
     long long forwardFromMessageId{0};
     std::string forwardFromSender;
     std::string forwardFromText;
+    std::string deletedAt;
+    std::string deletedBy;
 };
 
 struct ChatSummary {
@@ -165,6 +167,12 @@ public:
                                 std::string& groupName,
                                 std::vector<std::string>& memberUsernames,
                                 std::string& error);
+    bool deleteMessage(const std::string& requester,
+                       long long messageId,
+                       StoredMessage& storedMessage,
+                       std::string& chatId,
+                       std::vector<std::string>& audienceUsernames,
+                       std::string& error);
     bool deleteConversation(const std::string& user,
                             const std::string& peer,
                             std::string& error);

@@ -5,6 +5,8 @@
 #include <utility>
 
 namespace {
+    constexpr const char* kDeletedMessageText = "Сообщение удалено";
+
     class Statement {
     public:
         Statement(sqlite3* db, const char* sql, std::string& error) {
@@ -312,7 +314,7 @@ bool MessageStore::saveMessage(const std::string& sender,
     std::string replyToText;
     if (replyToMessageId > 0) {
         Statement replyStatement(db_,
-                                 "SELECT sender, body "
+                                 "SELECT sender, CASE WHEN deleted_at IS NOT NULL THEN ? ELSE body END "
                                  "FROM messages "
                                  "WHERE id = ? AND conversation_id = ?;",
                                  error);
@@ -320,8 +322,9 @@ bool MessageStore::saveMessage(const std::string& sender,
             return false;
         }
 
-        sqlite3_bind_int64(replyStatement.get(), 1, replyToMessageId);
-        sqlite3_bind_int64(replyStatement.get(), 2, conversationId);
+        sqlite3_bind_text(replyStatement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(replyStatement.get(), 2, replyToMessageId);
+        sqlite3_bind_int64(replyStatement.get(), 3, conversationId);
 
         const int replyResult = sqlite3_step(replyStatement.get());
         if (replyResult == SQLITE_DONE) {
@@ -344,7 +347,7 @@ bool MessageStore::saveMessage(const std::string& sender,
     std::string forwardFromText;
     if (forwardFromMessageId > 0) {
         Statement forwardStatement(db_,
-                                   "SELECT m.sender, m.body "
+                                   "SELECT m.sender, CASE WHEN m.deleted_at IS NOT NULL THEN ? ELSE m.body END "
                                    "FROM messages m "
                                    "JOIN conversations c ON c.id = m.conversation_id "
                                    "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
@@ -353,9 +356,10 @@ bool MessageStore::saveMessage(const std::string& sender,
             return false;
         }
 
-        sqlite3_bind_int64(forwardStatement.get(), 1, forwardFromMessageId);
-        sqlite3_bind_text(forwardStatement.get(), 2, sender.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(forwardStatement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(forwardStatement.get(), 2, forwardFromMessageId);
         sqlite3_bind_text(forwardStatement.get(), 3, sender.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(forwardStatement.get(), 4, sender.c_str(), -1, SQLITE_TRANSIENT);
 
         const int forwardResult = sqlite3_step(forwardStatement.get());
         if (forwardResult != SQLITE_ROW && forwardResult != SQLITE_DONE) {
@@ -369,7 +373,7 @@ bool MessageStore::saveMessage(const std::string& sender,
             forwardFromText = rawForwardText ? reinterpret_cast<const char*>(rawForwardText) : "";
         } else {
             Statement groupForward(db_,
-                                   "SELECT m.sender, m.body "
+                                   "SELECT m.sender, CASE WHEN m.deleted_at IS NOT NULL THEN ? ELSE m.body END "
                                    "FROM group_messages m "
                                    "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
                                    "WHERE m.id = ?;",
@@ -377,8 +381,9 @@ bool MessageStore::saveMessage(const std::string& sender,
             if (!groupForward) {
                 return false;
             }
-            sqlite3_bind_text(groupForward.get(), 1, sender.c_str(), -1, SQLITE_TRANSIENT);
-            sqlite3_bind_int64(groupForward.get(), 2, forwardFromMessageId);
+            sqlite3_bind_text(groupForward.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(groupForward.get(), 2, sender.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(groupForward.get(), 3, forwardFromMessageId);
             const int groupForwardResult = sqlite3_step(groupForward.get());
             if (groupForwardResult != SQLITE_ROW) {
                 error = groupForwardResult == SQLITE_DONE ? "forward target not found" : lastError(db_);
@@ -462,10 +467,12 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
                         "SELECT m.id, m.created_at, m.sender, m.recipient, m.body, "
                         "       COALESCE(m.reply_to_message_id, 0), "
                         "       COALESCE(reply.sender, ''), "
-                        "       COALESCE(reply.body, ''), "
+                        "       COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''), "
                         "       COALESCE(m.forward_from_message_id, 0), "
                         "       COALESCE(fwd.sender, ''), "
-                        "       COALESCE(fwd.body, '') "
+                        "       COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''), "
+                        "       COALESCE(m.deleted_at, ''), "
+                        "       COALESCE(m.deleted_by, '') "
                         "FROM messages m "
                         "JOIN conversations c ON c.id = m.conversation_id "
                         "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
@@ -476,9 +483,11 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
         return false;
     }
 
-    sqlite3_bind_int64(statement.get(), 1, messageId);
-    sqlite3_bind_text(statement.get(), 2, username.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_text(statement.get(), 3, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement.get(), 3, messageId);
+    sqlite3_bind_text(statement.get(), 4, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 5, username.c_str(), -1, SQLITE_TRANSIENT);
 
     const int result = sqlite3_step(statement.get());
     if (result == SQLITE_ROW) {
@@ -498,6 +507,8 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
         message.forwardFromMessageId = sqlite3_column_int64(statement.get(), 8);
         message.forwardFromSender = columnText(9);
         message.forwardFromText = columnText(10);
+        message.deletedAt = columnText(11);
+        message.deletedBy = columnText(12);
         return true;
     }
 
@@ -510,10 +521,12 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
                              "SELECT m.id, m.created_at, m.sender, g.name, m.body, "
                              "       COALESCE(m.reply_to_message_id, 0), "
                              "       COALESCE(reply.sender, ''), "
-                             "       COALESCE(reply.body, ''), "
+                             "       COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''), "
                              "       COALESCE(m.forward_from_message_id, 0), "
                              "       COALESCE(fwd.sender, ''), "
-                             "       COALESCE(fwd.body, '') "
+                             "       COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''), "
+                             "       COALESCE(m.deleted_at, ''), "
+                             "       COALESCE(m.deleted_by, '') "
                              "FROM group_messages m "
                              "JOIN groups_chat g ON g.id = m.group_id "
                              "JOIN group_members gm ON gm.group_id = g.id AND gm.username = ? "
@@ -524,8 +537,10 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
     if (!groupStatement) {
         return false;
     }
-    sqlite3_bind_text(groupStatement.get(), 1, username.c_str(), -1, SQLITE_TRANSIENT);
-    sqlite3_bind_int64(groupStatement.get(), 2, messageId);
+    sqlite3_bind_text(groupStatement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(groupStatement.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(groupStatement.get(), 3, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(groupStatement.get(), 4, messageId);
     const int groupResult = sqlite3_step(groupStatement.get());
     if (groupResult == SQLITE_DONE) {
         message = StoredMessage{};
@@ -552,6 +567,8 @@ bool MessageStore::loadAccessibleMessage(const std::string& username,
     message.forwardFromMessageId = sqlite3_column_int64(groupStatement.get(), 8);
     message.forwardFromSender = groupColumnText(9);
     message.forwardFromText = groupColumnText(10);
+    message.deletedAt = groupColumnText(11);
+    message.deletedBy = groupColumnText(12);
     return true;
 }
 
@@ -567,7 +584,7 @@ bool MessageStore::fetchChats(const std::string& user,
                               "  peer.username,"
                               "  m.created_at,"
                               "  m.sender,"
-                              "  m.body,"
+                              "  CASE WHEN m.deleted_at IS NOT NULL THEN ? ELSE m.body END,"
                               "  COALESCE(("
                               "    SELECT COUNT(1) "
                               "    FROM messages unread "
@@ -592,11 +609,12 @@ bool MessageStore::fetchChats(const std::string& user,
         return false;
     }
 
-    sqlite3_bind_text(directStatement.get(), 1, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directStatement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(directStatement.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(directStatement.get(), 3, user.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(directStatement.get(), 4, user.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(directStatement.get(), 5, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directStatement.get(), 6, user.c_str(), -1, SQLITE_TRANSIENT);
 
     while (true) {
         const int result = sqlite3_step(directStatement.get());
@@ -633,7 +651,7 @@ bool MessageStore::fetchChats(const std::string& user,
                              "  g.admin_username,"
                              "  m.created_at,"
                              "  m.sender,"
-                             "  m.body,"
+                             "  CASE WHEN m.deleted_at IS NOT NULL THEN ? ELSE m.body END,"
                              "  COALESCE(("
                              "    SELECT COUNT(1) "
                              "    FROM group_messages unread "
@@ -655,9 +673,10 @@ bool MessageStore::fetchChats(const std::string& user,
         return false;
     }
 
-    sqlite3_bind_text(groupStatement.get(), 1, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(groupStatement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(groupStatement.get(), 2, user.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(groupStatement.get(), 3, user.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(groupStatement.get(), 4, user.c_str(), -1, SQLITE_TRANSIENT);
 
     while (true) {
         const int result = sqlite3_step(groupStatement.get());
@@ -877,12 +896,14 @@ bool MessageStore::fetchHistory(const std::string& user,
                             "  m.body,"
                             "  COALESCE(m.reply_to_message_id, 0),"
                             "  COALESCE(reply.sender, ''),"
-                            "  COALESCE(reply.body, ''),"
+                            "  COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''),"
                             "  COALESCE(m.forward_from_message_id, 0),"
                             "  COALESCE(fwd.sender, ''),"
-                            "  COALESCE(fwd.body, '') "
+                            "  COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''),"
+                            "  COALESCE(m.deleted_at, ''),"
+                            "  COALESCE(m.deleted_by, '') "
                             "FROM ("
-                            "  SELECT id, created_at, sender, body, reply_to_message_id, forward_from_message_id "
+                            "  SELECT id, created_at, sender, body, reply_to_message_id, forward_from_message_id, deleted_at, deleted_by "
                             "  FROM group_messages "
                             "  WHERE group_id = ? "
                             "  ORDER BY id DESC "
@@ -896,8 +917,10 @@ bool MessageStore::fetchHistory(const std::string& user,
             return false;
         }
 
-        sqlite3_bind_int64(statement.get(), 1, groupId);
-        sqlite3_bind_int(statement.get(), 2, limit);
+        sqlite3_bind_text(statement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(statement.get(), 3, groupId);
+        sqlite3_bind_int(statement.get(), 4, limit);
 
         while (true) {
             const int result = sqlite3_step(statement.get());
@@ -944,6 +967,8 @@ bool MessageStore::fetchHistory(const std::string& user,
             item.forwardFromMessageId = sqlite3_column_int64(statement.get(), 7);
             item.forwardFromSender = columnText(8);
             item.forwardFromText = columnText(9);
+            item.deletedAt = columnText(10);
+            item.deletedBy = columnText(11);
             messages.push_back(item);
         }
     }
@@ -966,12 +991,14 @@ bool MessageStore::fetchHistory(const std::string& user,
                         "  m.body,"
                         "  COALESCE(m.reply_to_message_id, 0),"
                         "  COALESCE(reply.sender, ''),"
-                        "  COALESCE(reply.body, ''),"
+                        "  COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''),"
                         "  COALESCE(m.forward_from_message_id, 0),"
                         "  COALESCE(fwd.sender, ''),"
-                        "  COALESCE(fwd.body, '') "
+                        "  COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''),"
+                        "  COALESCE(m.deleted_at, ''),"
+                        "  COALESCE(m.deleted_by, '') "
                         "FROM ("
-                        "  SELECT id, created_at, sender, recipient, body, reply_to_message_id, forward_from_message_id "
+                        "  SELECT id, created_at, sender, recipient, body, reply_to_message_id, forward_from_message_id, deleted_at, deleted_by "
                         "  FROM messages "
                         "  WHERE conversation_id = ? "
                         "  ORDER BY id DESC "
@@ -985,8 +1012,10 @@ bool MessageStore::fetchHistory(const std::string& user,
         return false;
     }
 
-    sqlite3_bind_int64(statement.get(), 1, conversationId);
-    sqlite3_bind_int(statement.get(), 2, limit);
+    sqlite3_bind_text(statement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement.get(), 3, conversationId);
+    sqlite3_bind_int(statement.get(), 4, limit);
 
     while (true) {
         const int result = sqlite3_step(statement.get());
@@ -1015,7 +1044,9 @@ bool MessageStore::fetchHistory(const std::string& user,
             columnText(7),
             sqlite3_column_int64(statement.get(), 8),
             columnText(9),
-            columnText(10)
+            columnText(10),
+            columnText(11),
+            columnText(12)
         });
     }
 }
@@ -1057,12 +1088,14 @@ bool MessageStore::fetchHistoryBefore(const std::string& user,
                             "  m.body,"
                             "  COALESCE(m.reply_to_message_id, 0),"
                             "  COALESCE(reply.sender, ''),"
-                            "  COALESCE(reply.body, ''),"
+                            "  COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''),"
                             "  COALESCE(m.forward_from_message_id, 0),"
                             "  COALESCE(fwd.sender, ''),"
-                            "  COALESCE(fwd.body, '') "
+                            "  COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''),"
+                            "  COALESCE(m.deleted_at, ''),"
+                            "  COALESCE(m.deleted_by, '') "
                             "FROM ("
-                            "  SELECT id, created_at, sender, body, reply_to_message_id, forward_from_message_id "
+                            "  SELECT id, created_at, sender, body, reply_to_message_id, forward_from_message_id, deleted_at, deleted_by "
                             "  FROM group_messages "
                             "  WHERE group_id = ? AND id < ? "
                             "  ORDER BY id DESC "
@@ -1076,9 +1109,11 @@ bool MessageStore::fetchHistoryBefore(const std::string& user,
             return false;
         }
 
-        sqlite3_bind_int64(statement.get(), 1, groupId);
-        sqlite3_bind_int64(statement.get(), 2, beforeMessageId);
-        sqlite3_bind_int(statement.get(), 3, limit);
+        sqlite3_bind_text(statement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(statement.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(statement.get(), 3, groupId);
+        sqlite3_bind_int64(statement.get(), 4, beforeMessageId);
+        sqlite3_bind_int(statement.get(), 5, limit);
 
         while (true) {
             const int result = sqlite3_step(statement.get());
@@ -1108,6 +1143,8 @@ bool MessageStore::fetchHistoryBefore(const std::string& user,
             item.forwardFromMessageId = sqlite3_column_int64(statement.get(), 7);
             item.forwardFromSender = columnText(8);
             item.forwardFromText = columnText(9);
+            item.deletedAt = columnText(10);
+            item.deletedBy = columnText(11);
             messages.push_back(item);
         }
     }
@@ -1130,12 +1167,14 @@ bool MessageStore::fetchHistoryBefore(const std::string& user,
                         "  m.body,"
                         "  COALESCE(m.reply_to_message_id, 0),"
                         "  COALESCE(reply.sender, ''),"
-                        "  COALESCE(reply.body, ''),"
+                        "  COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''),"
                         "  COALESCE(m.forward_from_message_id, 0),"
                         "  COALESCE(fwd.sender, ''),"
-                        "  COALESCE(fwd.body, '') "
+                        "  COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''),"
+                        "  COALESCE(m.deleted_at, ''),"
+                        "  COALESCE(m.deleted_by, '') "
                         "FROM ("
-                        "  SELECT id, created_at, sender, recipient, body, reply_to_message_id, forward_from_message_id "
+                        "  SELECT id, created_at, sender, recipient, body, reply_to_message_id, forward_from_message_id, deleted_at, deleted_by "
                         "  FROM messages "
                         "  WHERE conversation_id = ? AND id < ? "
                         "  ORDER BY id DESC "
@@ -1149,9 +1188,11 @@ bool MessageStore::fetchHistoryBefore(const std::string& user,
         return false;
     }
 
-    sqlite3_bind_int64(statement.get(), 1, conversationId);
-    sqlite3_bind_int64(statement.get(), 2, beforeMessageId);
-    sqlite3_bind_int(statement.get(), 3, limit);
+    sqlite3_bind_text(statement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(statement.get(), 3, conversationId);
+    sqlite3_bind_int64(statement.get(), 4, beforeMessageId);
+    sqlite3_bind_int(statement.get(), 5, limit);
 
     while (true) {
         const int result = sqlite3_step(statement.get());
@@ -1180,7 +1221,9 @@ bool MessageStore::fetchHistoryBefore(const std::string& user,
             columnText(7),
             sqlite3_column_int64(statement.get(), 8),
             columnText(9),
-            columnText(10)
+            columnText(10),
+            columnText(11),
+            columnText(12)
         });
     }
 }
@@ -1282,6 +1325,218 @@ bool MessageStore::markConversationReadLocked(long long conversationId,
         return false;
     }
 
+    return true;
+}
+
+bool MessageStore::deleteMessage(const std::string& requester,
+                                 long long messageId,
+                                 StoredMessage& storedMessage,
+                                 std::string& chatId,
+                                 std::vector<std::string>& audienceUsernames,
+                                 std::string& error) {
+    storedMessage = StoredMessage{};
+    chatId.clear();
+    audienceUsernames.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    Statement directLookup(db_,
+                           "SELECT m.sender, m.recipient, COALESCE(m.deleted_at, '') "
+                           "FROM messages m "
+                           "JOIN conversations c ON c.id = m.conversation_id "
+                           "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
+                           error);
+    if (!directLookup) {
+        return false;
+    }
+    sqlite3_bind_int64(directLookup.get(), 1, messageId);
+    sqlite3_bind_text(directLookup.get(), 2, requester.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(directLookup.get(), 3, requester.c_str(), -1, SQLITE_TRANSIENT);
+
+    const int directResult = sqlite3_step(directLookup.get());
+    if (directResult == SQLITE_ROW) {
+        const auto* rawSender = sqlite3_column_text(directLookup.get(), 0);
+        const auto* rawRecipient = sqlite3_column_text(directLookup.get(), 1);
+        const auto* rawDeletedAt = sqlite3_column_text(directLookup.get(), 2);
+        const std::string sender = rawSender ? reinterpret_cast<const char*>(rawSender) : "";
+        const std::string recipient = rawRecipient ? reinterpret_cast<const char*>(rawRecipient) : "";
+        const std::string deletedAt = rawDeletedAt ? reinterpret_cast<const char*>(rawDeletedAt) : "";
+        if (sender != requester) {
+            error = "cannot_delete_other_user_message";
+            return false;
+        }
+
+        if (deletedAt.empty()) {
+            Statement update(db_,
+                             "UPDATE messages SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ? WHERE id = ?;",
+                             error);
+            if (!update) {
+                return false;
+            }
+            sqlite3_bind_text(update.get(), 1, requester.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(update.get(), 2, messageId);
+            if (sqlite3_step(update.get()) != SQLITE_DONE) {
+                error = lastError(db_);
+                return false;
+            }
+        }
+
+        Statement directLoad(db_,
+                             "SELECT m.id, m.created_at, m.sender, m.recipient, m.body, "
+                             "       COALESCE(m.reply_to_message_id, 0), "
+                             "       COALESCE(reply.sender, ''), "
+                             "       COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''), "
+                             "       COALESCE(m.forward_from_message_id, 0), "
+                             "       COALESCE(fwd.sender, ''), "
+                             "       COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''), "
+                             "       COALESCE(m.deleted_at, ''), "
+                             "       COALESCE(m.deleted_by, '') "
+                             "FROM messages m "
+                             "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
+                             "LEFT JOIN messages fwd ON fwd.id = m.forward_from_message_id "
+                             "WHERE m.id = ?;",
+                             error);
+        if (!directLoad) {
+            return false;
+        }
+        sqlite3_bind_text(directLoad.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(directLoad.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(directLoad.get(), 3, messageId);
+        if (sqlite3_step(directLoad.get()) != SQLITE_ROW) {
+            error = "message_not_found";
+            return false;
+        }
+        auto directText = [&](int column) -> std::string {
+            const auto* value = sqlite3_column_text(directLoad.get(), column);
+            return value ? reinterpret_cast<const char*>(value) : "";
+        };
+        storedMessage.id = sqlite3_column_int64(directLoad.get(), 0);
+        storedMessage.createdAt = directText(1);
+        storedMessage.sender = directText(2);
+        storedMessage.recipient = directText(3);
+        storedMessage.text = directText(4);
+        storedMessage.replyToMessageId = sqlite3_column_int64(directLoad.get(), 5);
+        storedMessage.replyToSender = directText(6);
+        storedMessage.replyToText = directText(7);
+        storedMessage.forwardFromMessageId = sqlite3_column_int64(directLoad.get(), 8);
+        storedMessage.forwardFromSender = directText(9);
+        storedMessage.forwardFromText = directText(10);
+        storedMessage.deletedAt = directText(11);
+        storedMessage.deletedBy = directText(12);
+
+        audienceUsernames.push_back(sender);
+        if (recipient != sender) {
+            audienceUsernames.push_back(recipient);
+        }
+        return true;
+    }
+    if (directResult != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+
+    Statement groupLookup(db_,
+                          "SELECT m.group_id, m.sender, COALESCE(m.deleted_at, '') "
+                          "FROM group_messages m "
+                          "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
+                          "WHERE m.id = ?;",
+                          error);
+    if (!groupLookup) {
+        return false;
+    }
+    sqlite3_bind_text(groupLookup.get(), 1, requester.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(groupLookup.get(), 2, messageId);
+
+    const int groupResult = sqlite3_step(groupLookup.get());
+    if (groupResult != SQLITE_ROW) {
+        if (groupResult == SQLITE_DONE) {
+            error = "message_not_found";
+        } else {
+            error = lastError(db_);
+        }
+        return false;
+    }
+
+    const long long groupId = sqlite3_column_int64(groupLookup.get(), 0);
+    const auto* rawGroupSender = sqlite3_column_text(groupLookup.get(), 1);
+    const auto* rawGroupDeletedAt = sqlite3_column_text(groupLookup.get(), 2);
+    const std::string sender = rawGroupSender ? reinterpret_cast<const char*>(rawGroupSender) : "";
+    const std::string deletedAt = rawGroupDeletedAt ? reinterpret_cast<const char*>(rawGroupDeletedAt) : "";
+    if (sender != requester) {
+        error = "cannot_delete_other_user_message";
+        return false;
+    }
+
+    if (deletedAt.empty()) {
+        Statement update(db_,
+                         "UPDATE group_messages SET deleted_at = CURRENT_TIMESTAMP, deleted_by = ? WHERE id = ?;",
+                         error);
+        if (!update) {
+            return false;
+        }
+        sqlite3_bind_text(update.get(), 1, requester.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(update.get(), 2, messageId);
+        if (sqlite3_step(update.get()) != SQLITE_DONE) {
+            error = lastError(db_);
+            return false;
+        }
+    }
+
+    std::string groupName;
+    std::string adminUsername;
+    if (!loadGroupContextLocked(groupId, groupName, adminUsername, audienceUsernames, error)) {
+        return false;
+    }
+    if (groupName.empty()) {
+        error = "group_not_found";
+        return false;
+    }
+
+    Statement groupLoad(db_,
+                        "SELECT m.id, m.created_at, m.sender, g.name, m.body, "
+                        "       COALESCE(m.reply_to_message_id, 0), "
+                        "       COALESCE(reply.sender, ''), "
+                        "       COALESCE(CASE WHEN reply.deleted_at IS NOT NULL THEN ? ELSE reply.body END, ''), "
+                        "       COALESCE(m.forward_from_message_id, 0), "
+                        "       COALESCE(fwd.sender, ''), "
+                        "       COALESCE(CASE WHEN fwd.deleted_at IS NOT NULL THEN ? ELSE fwd.body END, ''), "
+                        "       COALESCE(m.deleted_at, ''), "
+                        "       COALESCE(m.deleted_by, '') "
+                        "FROM group_messages m "
+                        "JOIN groups_chat g ON g.id = m.group_id "
+                        "LEFT JOIN group_messages reply ON reply.id = m.reply_to_message_id "
+                        "LEFT JOIN group_messages fwd ON fwd.id = m.forward_from_message_id "
+                        "WHERE m.id = ? AND m.group_id = ?;",
+                        error);
+    if (!groupLoad) {
+        return false;
+    }
+    sqlite3_bind_text(groupLoad.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(groupLoad.get(), 2, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+    sqlite3_bind_int64(groupLoad.get(), 3, messageId);
+    sqlite3_bind_int64(groupLoad.get(), 4, groupId);
+    if (sqlite3_step(groupLoad.get()) != SQLITE_ROW) {
+        error = "message_not_found";
+        return false;
+    }
+    auto groupText = [&](int column) -> std::string {
+        const auto* value = sqlite3_column_text(groupLoad.get(), column);
+        return value ? reinterpret_cast<const char*>(value) : "";
+    };
+    storedMessage.id = sqlite3_column_int64(groupLoad.get(), 0);
+    storedMessage.createdAt = groupText(1);
+    storedMessage.sender = groupText(2);
+    storedMessage.recipient = groupText(3);
+    storedMessage.text = groupText(4);
+    storedMessage.replyToMessageId = sqlite3_column_int64(groupLoad.get(), 5);
+    storedMessage.replyToSender = groupText(6);
+    storedMessage.replyToText = groupText(7);
+    storedMessage.forwardFromMessageId = sqlite3_column_int64(groupLoad.get(), 8);
+    storedMessage.forwardFromSender = groupText(9);
+    storedMessage.forwardFromText = groupText(10);
+    storedMessage.deletedAt = groupText(11);
+    storedMessage.deletedBy = groupText(12);
+
+    chatId = groupChatId(groupId);
     return true;
 }
 
@@ -1729,13 +1984,15 @@ bool MessageStore::saveGroupMessage(const std::string& sender,
     std::string replyToText;
     if (replyToMessageId > 0) {
         Statement replyStatement(db_,
-                                 "SELECT sender, body FROM group_messages WHERE id = ? AND group_id = ?;",
+                                 "SELECT sender, CASE WHEN deleted_at IS NOT NULL THEN ? ELSE body END "
+                                 "FROM group_messages WHERE id = ? AND group_id = ?;",
                                  error);
         if (!replyStatement) {
             return false;
         }
-        sqlite3_bind_int64(replyStatement.get(), 1, replyToMessageId);
-        sqlite3_bind_int64(replyStatement.get(), 2, groupId);
+        sqlite3_bind_text(replyStatement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(replyStatement.get(), 2, replyToMessageId);
+        sqlite3_bind_int64(replyStatement.get(), 3, groupId);
         const int replyResult = sqlite3_step(replyStatement.get());
         if (replyResult != SQLITE_ROW) {
             error = replyResult == SQLITE_DONE ? "reply target not found" : lastError(db_);
@@ -1751,7 +2008,7 @@ bool MessageStore::saveGroupMessage(const std::string& sender,
     std::string forwardFromText;
     if (forwardFromMessageId > 0) {
         Statement forwardStatement(db_,
-                                   "SELECT m.sender, m.body "
+                                   "SELECT m.sender, CASE WHEN m.deleted_at IS NOT NULL THEN ? ELSE m.body END "
                                    "FROM group_messages m "
                                    "JOIN group_members gm ON gm.group_id = m.group_id AND gm.username = ? "
                                    "WHERE m.id = ?;",
@@ -1759,8 +2016,9 @@ bool MessageStore::saveGroupMessage(const std::string& sender,
         if (!forwardStatement) {
             return false;
         }
-        sqlite3_bind_text(forwardStatement.get(), 1, sender.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_int64(forwardStatement.get(), 2, forwardFromMessageId);
+        sqlite3_bind_text(forwardStatement.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(forwardStatement.get(), 2, sender.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_int64(forwardStatement.get(), 3, forwardFromMessageId);
         const int forwardResult = sqlite3_step(forwardStatement.get());
         if (forwardResult == SQLITE_ROW) {
             const auto* rawSender = sqlite3_column_text(forwardStatement.get(), 0);
@@ -1769,7 +2027,7 @@ bool MessageStore::saveGroupMessage(const std::string& sender,
             forwardFromText = rawText ? reinterpret_cast<const char*>(rawText) : "";
         } else if (forwardResult == SQLITE_DONE) {
             Statement directForward(db_,
-                                    "SELECT m.sender, m.body "
+                                    "SELECT m.sender, CASE WHEN m.deleted_at IS NOT NULL THEN ? ELSE m.body END "
                                     "FROM messages m "
                                     "JOIN conversations c ON c.id = m.conversation_id "
                                     "WHERE m.id = ? AND (c.user_low = ? OR c.user_high = ?);",
@@ -1777,9 +2035,10 @@ bool MessageStore::saveGroupMessage(const std::string& sender,
             if (!directForward) {
                 return false;
             }
-            sqlite3_bind_int64(directForward.get(), 1, forwardFromMessageId);
-            sqlite3_bind_text(directForward.get(), 2, sender.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(directForward.get(), 1, kDeletedMessageText, -1, SQLITE_TRANSIENT);
+            sqlite3_bind_int64(directForward.get(), 2, forwardFromMessageId);
             sqlite3_bind_text(directForward.get(), 3, sender.c_str(), -1, SQLITE_TRANSIENT);
+            sqlite3_bind_text(directForward.get(), 4, sender.c_str(), -1, SQLITE_TRANSIENT);
             const int directResult = sqlite3_step(directForward.get());
             if (directResult != SQLITE_ROW) {
                 error = directResult == SQLITE_DONE ? "forward target not found" : lastError(db_);
@@ -1906,6 +2165,8 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
         "  body TEXT NOT NULL,"
         "  reply_to_message_id INTEGER,"
         "  forward_from_message_id INTEGER,"
+        "  deleted_at TEXT,"
+        "  deleted_by TEXT,"
         "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         "  FOREIGN KEY(conversation_id) REFERENCES conversations(id)"
         ");"
@@ -1928,6 +2189,8 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
         "  body TEXT NOT NULL,"
         "  reply_to_message_id INTEGER,"
         "  forward_from_message_id INTEGER,"
+        "  deleted_at TEXT,"
+        "  deleted_by TEXT,"
         "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
         "  FOREIGN KEY(group_id) REFERENCES groups_chat(id) ON DELETE CASCADE"
         ");"
@@ -1952,7 +2215,13 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
     return ensureColumnLocked("users", "password_salt", "TEXT", error) &&
            ensureColumnLocked("users", "password_hash", "TEXT", error) &&
            ensureColumnLocked("messages", "reply_to_message_id", "INTEGER", error) &&
-           ensureColumnLocked("messages", "forward_from_message_id", "INTEGER", error);
+           ensureColumnLocked("messages", "forward_from_message_id", "INTEGER", error) &&
+           ensureColumnLocked("messages", "deleted_at", "TEXT", error) &&
+           ensureColumnLocked("messages", "deleted_by", "TEXT", error) &&
+           ensureColumnLocked("group_messages", "reply_to_message_id", "INTEGER", error) &&
+           ensureColumnLocked("group_messages", "forward_from_message_id", "INTEGER", error) &&
+           ensureColumnLocked("group_messages", "deleted_at", "TEXT", error) &&
+           ensureColumnLocked("group_messages", "deleted_by", "TEXT", error);
 }
 
 bool MessageStore::ensureColumnLocked(const std::string& table,

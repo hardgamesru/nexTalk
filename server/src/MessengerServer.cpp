@@ -158,6 +158,27 @@ namespace {
         ERR_error_string_n(errorCode, buffer, sizeof(buffer));
         return buffer;
     }
+
+    std::vector<std::string> buildStoredMessageFields(const StoredMessage& storedMessage,
+                                                      const std::string& chatId,
+                                                      const std::string& recipientLabel) {
+        return {
+            std::to_string(storedMessage.id),
+            chatId,
+            storedMessage.createdAt,
+            storedMessage.sender,
+            recipientLabel,
+            storedMessage.text,
+            storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
+            storedMessage.replyToSender,
+            storedMessage.replyToText,
+            storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
+            storedMessage.forwardFromSender,
+            storedMessage.forwardFromText,
+            storedMessage.deletedAt,
+            storedMessage.deletedBy
+        };
+    }
 }
 
 MessengerServer::MessengerServer(int port,
@@ -502,6 +523,9 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::SendMessage:
             handleSendMessage(session, message);
             break;
+        case common::CommandType::DeleteMessage:
+            handleDeleteMessage(session, message);
+            break;
         case common::CommandType::ForwardMessage:
             handleForwardMessage(session, message);
             break;
@@ -689,37 +713,12 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
             return;
         }
 
-        const std::vector<std::string> selfFields = {
-            "ok",
-            std::to_string(storedMessage.id),
-            targetChatId,
-            storedMessage.createdAt,
-            storedMessage.sender,
-            groupName,
-            storedMessage.text,
-            storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
-            storedMessage.replyToSender,
-            storedMessage.replyToText,
-            storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-            storedMessage.forwardFromSender,
-            storedMessage.forwardFromText
-        };
+        std::vector<std::string> selfFields = {"ok"};
+        const std::vector<std::string> baseFields = buildStoredMessageFields(storedMessage, targetChatId, groupName);
+        selfFields.insert(selfFields.end(), baseFields.begin(), baseFields.end());
         sendToSession(session, {common::CommandType::SendMessageResult, selfFields});
 
-        const std::vector<std::string> incomingFields = {
-            std::to_string(storedMessage.id),
-            targetChatId,
-            storedMessage.createdAt,
-            storedMessage.sender,
-            groupName,
-            storedMessage.text,
-            storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
-            storedMessage.replyToSender,
-            storedMessage.replyToText,
-            storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-            storedMessage.forwardFromSender,
-            storedMessage.forwardFromText
-        };
+        const std::vector<std::string> incomingFields = buildStoredMessageFields(storedMessage, targetChatId, groupName);
 
         std::lock_guard<std::mutex> lock(clientsMutex_);
         for (const auto& username : memberUsernames) {
@@ -776,35 +775,11 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
         return;
     }
 
-    const std::vector<std::string> messageFields = {
-        std::to_string(storedMessage.id),
-        recipientName,
-        storedMessage.createdAt,
-        storedMessage.sender,
-        storedMessage.recipient,
-        storedMessage.text,
-        storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
-        storedMessage.replyToSender,
-        storedMessage.replyToText,
-        storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-        storedMessage.forwardFromSender,
-        storedMessage.forwardFromText
-    };
+    const std::vector<std::string> messageFields = buildStoredMessageFields(storedMessage, recipientName, storedMessage.recipient);
 
-    sendToSession(session, {common::CommandType::SendMessageResult,
-                            {"ok",
-                             std::to_string(storedMessage.id),
-                             recipientName,
-                             storedMessage.createdAt,
-                             storedMessage.sender,
-                             storedMessage.recipient,
-                             storedMessage.text,
-                             storedMessage.replyToMessageId > 0 ? std::to_string(storedMessage.replyToMessageId) : "",
-                             storedMessage.replyToSender,
-                             storedMessage.replyToText,
-                             storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-                             storedMessage.forwardFromSender,
-                             storedMessage.forwardFromText}});
+    std::vector<std::string> selfFields = {"ok"};
+    selfFields.insert(selfFields.end(), messageFields.begin(), messageFields.end());
+    sendToSession(session, {common::CommandType::SendMessageResult, selfFields});
 
     if (!recipient) {
         sendToSession(session, {common::CommandType::Info, {"saved for offline user " + recipientName}});
@@ -826,6 +801,75 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
     logEvent("message_delivered from=" + session->username + " to=" + recipientName);
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
     handleFetchChats(recipient, {common::CommandType::FetchChats, {}});
+}
+
+void MessengerServer::handleDeleteMessage(const std::shared_ptr<ClientSession>& session,
+                                          const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    if (message.fields.size() != 1) {
+        sendToSession(session, {common::CommandType::DeleteMessageResult, {"error", "usage: delete_message <message_id>"}});
+        return;
+    }
+
+    long long messageId = 0;
+    if (!parsePositiveInt64(message.fields[0], messageId)) {
+        sendToSession(session, {common::CommandType::DeleteMessageResult, {"error", "invalid_message_id"}});
+        return;
+    }
+
+    StoredMessage storedMessage;
+    std::string resolvedChatId;
+    std::vector<std::string> audienceUsernames;
+    std::string storageError;
+    if (!messageStore_.deleteMessage(session->username,
+                                     messageId,
+                                     storedMessage,
+                                     resolvedChatId,
+                                     audienceUsernames,
+                                     storageError)) {
+        sendToSession(session, {common::CommandType::DeleteMessageResult,
+                                {"error", storageError.empty() ? "message_not_found" : storageError}});
+        return;
+    }
+
+    sendToSession(session, {common::CommandType::DeleteMessageResult, {"ok", std::to_string(messageId)}});
+
+    long long resolvedGroupId = 0;
+    const bool isGroupMessage = !resolvedChatId.empty() && parseGroupChatIdValue(resolvedChatId, resolvedGroupId);
+    std::set<std::string> delivered;
+    for (const auto& username : audienceUsernames) {
+        if (username.empty() || !delivered.insert(username).second) {
+            continue;
+        }
+
+        std::shared_ptr<ClientSession> targetSession;
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex_);
+            const auto it = onlineUsers_.find(username);
+            if (it != onlineUsers_.end()) {
+                targetSession = it->second;
+            }
+        }
+
+        if (!targetSession) {
+            continue;
+        }
+
+        const std::string chatId = isGroupMessage ? resolvedChatId
+                                  : (username == storedMessage.sender ? storedMessage.recipient : storedMessage.sender);
+        const std::string recipientLabel = storedMessage.recipient;
+        sendToSession(targetSession,
+                      {common::CommandType::MessageDeleted,
+                       buildStoredMessageFields(storedMessage, chatId, recipientLabel)});
+        handleFetchChats(targetSession, {common::CommandType::FetchChats, {}});
+    }
+
+    logEvent("message_deleted user=" + session->username +
+             " message_id=" + std::to_string(storedMessage.id));
 }
 
 void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>& session,
@@ -891,24 +935,10 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
             return;
         }
 
-        const std::vector<std::string> fields = {
-            std::to_string(storedMessage.id),
-            targetChatId,
-            storedMessage.createdAt,
-            storedMessage.sender,
-            groupName,
-            storedMessage.text,
-            "",
-            "",
-            "",
-            storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-            storedMessage.forwardFromSender,
-            storedMessage.forwardFromText
-        };
-        sendToSession(session, {common::CommandType::SendMessageResult, std::vector<std::string>{"ok",
-            std::to_string(storedMessage.id), targetChatId, storedMessage.createdAt, storedMessage.sender, groupName, storedMessage.text,
-            "", "", "", storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-            storedMessage.forwardFromSender, storedMessage.forwardFromText}});
+        const std::vector<std::string> fields = buildStoredMessageFields(storedMessage, targetChatId, groupName);
+        std::vector<std::string> senderFields = {"ok"};
+        senderFields.insert(senderFields.end(), fields.begin(), fields.end());
+        sendToSession(session, {common::CommandType::SendMessageResult, senderFields});
         std::lock_guard<std::mutex> lock(clientsMutex_);
         for (const auto& username : memberUsernames) {
             if (username == session->username) {
@@ -956,25 +986,12 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
         return;
     }
 
-    const std::vector<std::string> senderFields = {
-        "ok",
-        std::to_string(storedMessage.id),
-        recipientName,
-        storedMessage.createdAt,
-        storedMessage.sender,
-        storedMessage.recipient,
-        storedMessage.text,
-        "",
-        "",
-        "",
-        storedMessage.forwardFromMessageId > 0 ? std::to_string(storedMessage.forwardFromMessageId) : "",
-        storedMessage.forwardFromSender,
-        storedMessage.forwardFromText
-    };
+    std::vector<std::string> senderFields = {"ok"};
+    const std::vector<std::string> forwardFields = buildStoredMessageFields(storedMessage, recipientName, storedMessage.recipient);
+    senderFields.insert(senderFields.end(), forwardFields.begin(), forwardFields.end());
     sendToSession(session, {common::CommandType::SendMessageResult, senderFields});
 
-    std::vector<std::string> incomingFields = senderFields;
-    incomingFields.erase(incomingFields.begin());
+    std::vector<std::string> incomingFields = forwardFields;
     incomingFields[1] = session->username;
     if (recipient) {
         sendToSession(recipient, {common::CommandType::IncomingMessage, incomingFields});
@@ -1023,18 +1040,7 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
         const std::string chatId = parseGroupChatIdValue(message.fields[0], historyGroupId) ? message.fields[0]
                                    : (item.sender == session->username ? item.recipient : item.sender);
         sendToSession(session, {common::CommandType::HistoryMessage,
-                                {std::to_string(item.id),
-                                 chatId,
-                                 item.createdAt,
-                                 item.sender,
-                                 item.recipient,
-                                 item.text,
-                                 item.replyToMessageId > 0 ? std::to_string(item.replyToMessageId) : "",
-                                 item.replyToSender,
-                                 item.replyToText,
-                                 item.forwardFromMessageId > 0 ? std::to_string(item.forwardFromMessageId) : "",
-                                 item.forwardFromSender,
-                                 item.forwardFromText}});
+                                buildStoredMessageFields(item, chatId, item.recipient)});
     }
 
     sendToSession(session, {common::CommandType::HistoryResult,
@@ -1100,18 +1106,7 @@ void MessengerServer::handleFetchHistoryBefore(const std::shared_ptr<ClientSessi
         const std::string chatId = parseGroupChatIdValue(message.fields[0], historyGroupId) ? message.fields[0]
                                    : (item.sender == session->username ? item.recipient : item.sender);
         sendToSession(session, {common::CommandType::HistoryMessage,
-                                {std::to_string(item.id),
-                                 chatId,
-                                 item.createdAt,
-                                 item.sender,
-                                 item.recipient,
-                                 item.text,
-                                 item.replyToMessageId > 0 ? std::to_string(item.replyToMessageId) : "",
-                                 item.replyToSender,
-                                 item.replyToText,
-                                 item.forwardFromMessageId > 0 ? std::to_string(item.forwardFromMessageId) : "",
-                                 item.forwardFromSender,
-                                 item.forwardFromText}});
+                                buildStoredMessageFields(item, chatId, item.recipient)});
     }
 
     sendToSession(session, {common::CommandType::HistoryResult,

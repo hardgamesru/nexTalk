@@ -101,6 +101,12 @@ private:
                            const common::ProtocolMessage& message);
 
     /**
+     * Помечает сообщение удаленным у всех участников чата.
+     */
+    void handleDeleteMessage(const std::shared_ptr<ClientSession>& session,
+                             const common::ProtocolMessage& message);
+
+    /**
      * Пересылает уже существующее сообщение в другой личный диалог.
      */
     void handleForwardMessage(const std::shared_ptr<ClientSession>& session,
