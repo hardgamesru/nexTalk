@@ -218,6 +218,7 @@ button:disabled {
   gap: 8px;
   text-align: left;
   padding: 10px;
+  cursor: pointer;
 }
 
 .chat-row.active {
@@ -824,11 +825,21 @@ button:disabled {
   flex-wrap: wrap;
 }
 
+.group-add-label {
+  display: block;
+  margin-top: 14px;
+}
+
 .modal-actions {
   margin-top: 10px;
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+
+.group-settings-actions .danger.small {
+  width: auto;
+  min-width: 0;
 }
 
 .forward-modal .modal-actions .primary {

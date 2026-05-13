@@ -5,6 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
+    "dev:alt": "vite --host 127.0.0.1 --port 5175 --strictPort",
     "bridge": "node bridge/server.mjs",
     "build": "vue-tsc -b && vite build",
     "preview": "vite preview"

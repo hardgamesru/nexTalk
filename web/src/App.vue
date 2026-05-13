@@ -116,6 +116,9 @@ const syncingRecentByPeer: Record<string, boolean> = {};
 const historyRequestModeByPeer: Record<string, "latest" | "older"> = {};
 const historyBatchCountByPeer: Record<string, number> = {};
 const olderScrollStateByPeer: Record<string, { oldScrollHeight: number; oldScrollTop: number }> = {};
+const chatFetchSeenPeerIds = new Set<string>();
+let chatFetchInFlight = false;
+let chatFetchQueued = false;
 
 let ws: WebSocket | null = null;
 let pendingAuth: { mode: "login" | "register"; username: string; password: string } | null = null;
@@ -243,6 +246,15 @@ function scrollMessagesToBottom() {
   }
 }
 
+function parseChatTimestamp(value: string) {
+  if (!value) {
+    return Number.NEGATIVE_INFINITY;
+  }
+
+  const parsed = Date.parse(value.replace(" ", "T"));
+  return Number.isNaN(parsed) ? Number.NEGATIVE_INFINITY : parsed;
+}
+
 function clearRecord(record: Record<string, unknown>) {
   Object.keys(record).forEach((key) => {
     delete record[key];
@@ -251,6 +263,39 @@ function clearRecord(record: Record<string, unknown>) {
 
 function setMessagesForPeer(peer: string, messages: ChatMessage[]) {
   messagesByPeer[peer] = dedupeAndSortMessages(messages);
+}
+
+function sortChats() {
+  const nextChats = Object.values(chatIndex).sort((left, right) => {
+    const rightTime = parseChatTimestamp(right.lastAt);
+    const leftTime = parseChatTimestamp(left.lastAt);
+    if (rightTime !== leftTime) {
+      return rightTime - leftTime;
+    }
+    return left.peer.localeCompare(right.peer);
+  });
+
+  const current = chats.value;
+  const sameOrder =
+    current.length === nextChats.length &&
+    current.every((chat, index) => {
+      const nextChat = nextChats[index];
+      return (
+        nextChat &&
+        chat.peerId === nextChat.peerId &&
+        chat.lastAt === nextChat.lastAt &&
+        chat.lastSender === nextChat.lastSender &&
+        chat.lastText === nextChat.lastText &&
+        chat.unreadCount === nextChat.unreadCount &&
+        chat.canManage === nextChat.canManage &&
+        chat.peer === nextChat.peer &&
+        chat.kind === nextChat.kind
+      );
+    });
+
+  if (!sameOrder) {
+    chats.value = nextChats;
+  }
 }
 
 async function persistRecentMessages(peer: string) {
@@ -586,6 +631,22 @@ function pushMessage(peer: string, message: ChatMessage) {
   }
 }
 
+function updateChatPreviewFromMessage(peer: string, message: ChatMessage, unreadCount?: number) {
+  const existingChat = chatIndex[peer];
+  if (!existingChat) {
+    return false;
+  }
+
+  existingChat.lastAt = message.createdAt;
+  existingChat.lastSender = message.sender;
+  existingChat.lastText = message.text;
+  if (typeof unreadCount === "number") {
+    existingChat.unreadCount = unreadCount;
+  }
+  sortChats();
+  return true;
+}
+
 function sendMessage() {
   const peer = session.selectedPeer;
   const text = ui.messageDraft.trim();
@@ -604,15 +665,14 @@ function sendMessage() {
   ui.contextMenuVisible = false;
 }
 
-function clearChatIndex() {
-  Object.keys(chatIndex).forEach((key) => {
-    delete chatIndex[key];
-  });
-  chats.value = [];
-}
-
 function fetchChats() {
-  clearChatIndex();
+  if (chatFetchInFlight) {
+    chatFetchQueued = true;
+    return;
+  }
+
+  chatFetchInFlight = true;
+  chatFetchSeenPeerIds.clear();
   sendCommand("fetch_chats");
 }
 
@@ -829,6 +889,7 @@ function addUserToGroup(user: SearchUser) {
   if (!ui.groupSettingsChatId) {
     return;
   }
+  ui.groupAddSearchResults = ui.groupAddSearchResults.filter((item) => item.username !== user.username);
   sendCommand("add_group_members", [ui.groupSettingsChatId, user.username]);
 }
 
@@ -839,14 +900,14 @@ function removeUserFromGroup(username: string) {
   if (!confirm(`Remove ${username} from the group?`)) {
     return;
   }
-  if (!confirm(`Please confirm again: remove ${username}?`)) {
-    return;
-  }
   sendCommand("remove_group_member", [ui.groupSettingsChatId, username]);
 }
 
 function transferAdmin(username: string) {
   if (!ui.groupSettingsChatId || username === ui.groupSettingsAdminUsername) {
+    return;
+  }
+  if (!confirm(`Make ${username} the new administrator?`)) {
     return;
   }
   sendCommand("transfer_group_admin", [ui.groupSettingsChatId, username]);
@@ -981,15 +1042,33 @@ onBeforeUnmount(() => {
 });
 
 function upsertChat(chat: ChatItem) {
-  chatIndex[chat.peerId] = chat;
-  chats.value = Object.values(chatIndex).sort((left, right) => {
-    const leftTime = Date.parse(left.lastAt.replace(" ", "T"));
-    const rightTime = Date.parse(right.lastAt.replace(" ", "T"));
-    if (!Number.isNaN(leftTime) && !Number.isNaN(rightTime) && leftTime !== rightTime) {
-      return rightTime - leftTime;
-    }
-    return left.peer.localeCompare(right.peer);
-  });
+  const existingChat = chatIndex[chat.peerId];
+  if (existingChat) {
+    existingChat.peer = chat.peer;
+    existingChat.kind = chat.kind;
+    existingChat.lastAt = chat.lastAt;
+    existingChat.lastSender = chat.lastSender;
+    existingChat.lastText = chat.lastText;
+    existingChat.unreadCount = chat.unreadCount;
+    existingChat.canManage = chat.canManage;
+  } else {
+    chatIndex[chat.peerId] = { ...chat };
+  }
+  if (!chatFetchInFlight) {
+    sortChats();
+  }
+}
+
+function removeChatState(peerId: string) {
+  delete chatIndex[peerId];
+  delete messagesByPeer[peerId];
+  delete loadingOlderByPeer[peerId];
+  delete reachedHistoryStartByPeer[peerId];
+  delete syncingRecentByPeer[peerId];
+  delete historyRequestModeByPeer[peerId];
+  delete historyBatchCountByPeer[peerId];
+  delete olderScrollStateByPeer[peerId];
+  sortChats();
 }
 
 async function handleProtocolMessage(message: ProtocolMessage) {
@@ -1054,6 +1133,9 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         const peer = sentMessage.chatId || peerForMessage(sentMessage);
         pushMessage(peer, sentMessage);
         await persistSingleMessage(peer, sentMessage);
+        if (!updateChatPreviewFromMessage(peer, sentMessage, 0)) {
+          fetchChats();
+        }
         sendCommand("mark_read", [peer]);
       } else {
         pushLog(`Send error: ${b}`);
@@ -1070,9 +1152,11 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       pushMessage(peer, incomingMessage);
       await persistSingleMessage(peer, incomingMessage);
       if (session.selectedPeer === peer) {
+        updateChatPreviewFromMessage(peer, incomingMessage, 0);
         sendCommand("mark_read", [peer]);
+      } else if (!updateChatPreviewFromMessage(peer, incomingMessage, (chatIndex[peer]?.unreadCount ?? 0) + 1)) {
+        fetchChats();
       }
-      fetchChats();
       break;
     }
     case "history_message": {
@@ -1132,7 +1216,6 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         if (resultPeer && resultMode !== "older") {
           await persistRecentMessages(resultPeer);
         }
-        fetchChats();
       } else if (resultMode === "older" && resultPeer) {
         loadingOlderByPeer[resultPeer] = false;
       } else if (resultPeer) {
@@ -1141,6 +1224,9 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       break;
     }
     case "chat_item":
+      if (chatFetchInFlight) {
+        chatFetchSeenPeerIds.add(a);
+      }
       upsertChat({
         peerId: a,
         peer: b,
@@ -1153,6 +1239,20 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       });
       break;
     case "chat_list_result":
+      if (chatFetchInFlight) {
+        Object.keys(chatIndex).forEach((peerId) => {
+          if (!chatFetchSeenPeerIds.has(peerId)) {
+            removeChatState(peerId);
+          }
+        });
+        chatFetchSeenPeerIds.clear();
+        sortChats();
+        chatFetchInFlight = false;
+        if (chatFetchQueued) {
+          chatFetchQueued = false;
+          fetchChats();
+        }
+      }
       pushLog(`Chats ${a}: ${b}`);
       break;
     case "user_search_item":
@@ -1198,15 +1298,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
     case "delete_chat_result":
       if (a === "ok") {
         const removedPeer = c;
-        delete chatIndex[removedPeer];
-        chats.value = Object.values(chatIndex);
-        delete messagesByPeer[removedPeer];
-        delete loadingOlderByPeer[removedPeer];
-        delete reachedHistoryStartByPeer[removedPeer];
-        delete syncingRecentByPeer[removedPeer];
-        delete historyRequestModeByPeer[removedPeer];
-        delete historyBatchCountByPeer[removedPeer];
-        delete olderScrollStateByPeer[removedPeer];
+        removeChatState(removedPeer);
         if (session.selectedPeer === removedPeer) {
           session.selectedPeer = "";
           ui.replyTarget = null;
@@ -1218,9 +1310,9 @@ async function handleProtocolMessage(message: ProtocolMessage) {
     case "mark_read_result":
       if (a === "ok") {
         const peer = b;
-        if (chatIndex[peer]) {
+        if (chatIndex[peer] && chatIndex[peer].unreadCount !== 0) {
           chatIndex[peer].unreadCount = 0;
-          chats.value = Object.values(chatIndex);
+          sortChats();
         }
       } else {
         pushLog("Mark read failed");
@@ -1255,15 +1347,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       break;
     case "chat_removed": {
       const removedChatId = a;
-      delete chatIndex[removedChatId];
-      chats.value = Object.values(chatIndex);
-      delete messagesByPeer[removedChatId];
-      delete loadingOlderByPeer[removedChatId];
-      delete reachedHistoryStartByPeer[removedChatId];
-      delete syncingRecentByPeer[removedChatId];
-      delete historyRequestModeByPeer[removedChatId];
-      delete historyBatchCountByPeer[removedChatId];
-      delete olderScrollStateByPeer[removedChatId];
+      removeChatState(removedChatId);
       if (session.selectedPeer === removedChatId) {
         session.selectedPeer = "";
       }
@@ -1315,7 +1399,7 @@ watch(
         </div>
         <input v-model="ui.chatFilter" placeholder="Search chats" />
         <div class="chat-list">
-          <button
+          <div
             v-for="chat in filteredChats"
             :key="chat.peerId"
             class="chat-row"
@@ -1332,7 +1416,7 @@ watch(
               <span v-if="chat.unreadCount > 0 && session.selectedPeer !== chat.peerId" class="unread-dot"></span>
               <button v-if="chat.kind === 'dm'" class="chat-delete" @click.stop="deleteChat(chat.peerId)">x</button>
             </div>
-          </button>
+          </div>
         </div>
       </section>
     </aside>
@@ -1604,7 +1688,7 @@ watch(
             </div>
           </div>
           <template v-if="ui.groupSettingsCanManage">
-            <label>Add members</label>
+            <label class="group-add-label">Add members</label>
             <div class="modal-search">
               <input v-model="ui.groupAddSearchQuery" type="text" placeholder="username" @keydown.enter.prevent="runGroupAddSearch" />
               <button class="small" @click="runGroupAddSearch" :disabled="ui.groupAddSearchInFlight">
@@ -1622,8 +1706,8 @@ watch(
                 <small>Add</small>
               </button>
             </div>
-            <div class="modal-actions">
-              <button class="danger" @click="deleteCurrentGroup">Delete group</button>
+            <div class="modal-actions group-settings-actions">
+              <button class="danger small" @click="deleteCurrentGroup">Delete group</button>
             </div>
           </template>
           <div v-else class="modal-actions">
