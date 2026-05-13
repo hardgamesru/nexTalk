@@ -84,6 +84,7 @@ namespace common {
         case CommandType::SendMessageResult: return "send_message_result";
         case CommandType::IncomingMessage: return "incoming_message";
         case CommandType::FetchHistory: return "fetch_history";
+        case CommandType::FetchHistoryBefore: return "fetch_history_before";
         case CommandType::HistoryMessage: return "history_message";
         case CommandType::HistoryResult: return "history_result";
         case CommandType::FetchChats: return "fetch_chats";
@@ -129,6 +130,7 @@ namespace common {
         if (value == "send_message_result") return CommandType::SendMessageResult;
         if (value == "incoming_message") return CommandType::IncomingMessage;
         if (value == "fetch_history") return CommandType::FetchHistory;
+        if (value == "fetch_history_before") return CommandType::FetchHistoryBefore;
         if (value == "history_message") return CommandType::HistoryMessage;
         if (value == "history_result") return CommandType::HistoryResult;
         if (value == "fetch_chats") return CommandType::FetchChats;

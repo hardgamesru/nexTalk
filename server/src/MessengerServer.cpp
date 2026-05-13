@@ -434,6 +434,9 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::FetchHistory:
             handleFetchHistory(session, message);
             break;
+        case common::CommandType::FetchHistoryBefore:
+            handleFetchHistoryBefore(session, message);
+            break;
         case common::CommandType::FetchChats:
             handleFetchChats(session, message);
             break;
@@ -936,7 +939,8 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
         logEvent("history_fetch_failed user=" + session->username +
                  " peer=" + message.fields[0] +
                  " error=\"" + escapeLogField(storageError) + "\"");
-        sendToSession(session, {common::CommandType::HistoryResult, {"error", "storage error"}});
+        sendToSession(session, {common::CommandType::HistoryResult,
+                                {"error", "storage error", message.fields[0], "latest"}});
         return;
     }
 
@@ -962,10 +966,90 @@ void MessengerServer::handleFetchHistory(const std::shared_ptr<ClientSession>& s
     sendToSession(session, {common::CommandType::HistoryResult,
                             {"ok",
                              "history with " + message.fields[0] + ": " +
-                                 std::to_string(history.size()) + " message(s)"}});
+                                 std::to_string(history.size()) + " message(s)",
+                             message.fields[0],
+                             "latest"}});
 
     logEvent("history_fetched user=" + session->username +
              " peer=" + message.fields[0] +
+             " count=" + std::to_string(history.size()));
+}
+
+void MessengerServer::handleFetchHistoryBefore(const std::shared_ptr<ClientSession>& session,
+                                               const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+
+    if (message.fields.size() != 3 || message.fields[0].empty()) {
+        sendToSession(session, {common::CommandType::Error,
+                                {"usage: fetch_history_before <chat_id> <before_message_id> <limit>"}});
+        return;
+    }
+
+    long long beforeMessageId = 0;
+    if (!parsePositiveInt64(message.fields[1], beforeMessageId)) {
+        sendToSession(session, {common::CommandType::Error, {"before_message_id must be a positive number"}});
+        return;
+    }
+
+    int limit = kDefaultHistoryLimit;
+    if (!parsePositiveInt(message.fields[2], limit)) {
+        sendToSession(session, {common::CommandType::Error, {"history limit must be a positive number"}});
+        return;
+    }
+
+    if (limit > kMaxHistoryLimit) {
+        limit = kMaxHistoryLimit;
+    }
+
+    std::vector<StoredMessage> history;
+    std::string storageError;
+    if (!messageStore_.fetchHistoryBefore(session->username,
+                                          message.fields[0],
+                                          beforeMessageId,
+                                          limit,
+                                          history,
+                                          storageError)) {
+        logEvent("history_before_fetch_failed user=" + session->username +
+                 " peer=" + message.fields[0] +
+                 " before=" + message.fields[1] +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+        sendToSession(session, {common::CommandType::HistoryResult,
+                                {"error", "storage error", message.fields[0], "older"}});
+        return;
+    }
+
+    for (const auto& item : history) {
+        long long historyGroupId = 0;
+        const std::string chatId = parseGroupChatIdValue(message.fields[0], historyGroupId) ? message.fields[0]
+                                   : (item.sender == session->username ? item.recipient : item.sender);
+        sendToSession(session, {common::CommandType::HistoryMessage,
+                                {std::to_string(item.id),
+                                 chatId,
+                                 item.createdAt,
+                                 item.sender,
+                                 item.recipient,
+                                 item.text,
+                                 item.replyToMessageId > 0 ? std::to_string(item.replyToMessageId) : "",
+                                 item.replyToSender,
+                                 item.replyToText,
+                                 item.forwardFromMessageId > 0 ? std::to_string(item.forwardFromMessageId) : "",
+                                 item.forwardFromSender,
+                                 item.forwardFromText}});
+    }
+
+    sendToSession(session, {common::CommandType::HistoryResult,
+                            {"ok",
+                             "history before " + message.fields[0] + ": " +
+                                 std::to_string(history.size()) + " message(s)",
+                             message.fields[0],
+                             "older"}});
+
+    logEvent("history_before_fetched user=" + session->username +
+             " peer=" + message.fields[0] +
+             " before=" + message.fields[1] +
              " count=" + std::to_string(history.size()));
 }
 

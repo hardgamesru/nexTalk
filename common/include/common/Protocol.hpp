@@ -22,6 +22,7 @@ namespace common {
         SendMessageResult,
         IncomingMessage,
         FetchHistory,
+        FetchHistoryBefore,
         HistoryMessage,
         HistoryResult,
         FetchChats,

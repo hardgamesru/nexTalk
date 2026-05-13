@@ -1020,6 +1020,171 @@ bool MessageStore::fetchHistory(const std::string& user,
     }
 }
 
+bool MessageStore::fetchHistoryBefore(const std::string& user,
+                                      const std::string& peer,
+                                      long long beforeMessageId,
+                                      int limit,
+                                      std::vector<StoredMessage>& messages,
+                                      std::string& error) {
+    messages.clear();
+
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    long long groupId = 0;
+    if (parseGroupChatId(peer, groupId)) {
+        bool isMember = false;
+        if (!isGroupMemberLocked(groupId, user, isMember, error)) {
+            return false;
+        }
+
+        if (!isMember) {
+            error = "group not found";
+            return false;
+        }
+
+        std::string groupName;
+        std::string adminUsername;
+        std::vector<std::string> memberUsernames;
+        if (!loadGroupContextLocked(groupId, groupName, adminUsername, memberUsernames, error)) {
+            return false;
+        }
+
+        Statement statement(db_,
+                            "SELECT "
+                            "  m.id,"
+                            "  m.created_at,"
+                            "  m.sender,"
+                            "  m.body,"
+                            "  COALESCE(m.reply_to_message_id, 0),"
+                            "  COALESCE(reply.sender, ''),"
+                            "  COALESCE(reply.body, ''),"
+                            "  COALESCE(m.forward_from_message_id, 0),"
+                            "  COALESCE(fwd.sender, ''),"
+                            "  COALESCE(fwd.body, '') "
+                            "FROM ("
+                            "  SELECT id, created_at, sender, body, reply_to_message_id, forward_from_message_id "
+                            "  FROM group_messages "
+                            "  WHERE group_id = ? AND id < ? "
+                            "  ORDER BY id DESC "
+                            "  LIMIT ?"
+                            ") m "
+                            "LEFT JOIN group_messages reply ON reply.id = m.reply_to_message_id "
+                            "LEFT JOIN group_messages fwd ON fwd.id = m.forward_from_message_id "
+                            "ORDER BY m.id ASC;",
+                            error);
+        if (!statement) {
+            return false;
+        }
+
+        sqlite3_bind_int64(statement.get(), 1, groupId);
+        sqlite3_bind_int64(statement.get(), 2, beforeMessageId);
+        sqlite3_bind_int(statement.get(), 3, limit);
+
+        while (true) {
+            const int result = sqlite3_step(statement.get());
+            if (result == SQLITE_DONE) {
+                return true;
+            }
+
+            if (result != SQLITE_ROW) {
+                error = lastError(db_);
+                return false;
+            }
+
+            auto columnText = [&](int column) -> std::string {
+                const auto* value = sqlite3_column_text(statement.get(), column);
+                return value ? reinterpret_cast<const char*>(value) : "";
+            };
+
+            StoredMessage item;
+            item.id = sqlite3_column_int64(statement.get(), 0);
+            item.createdAt = columnText(1);
+            item.sender = columnText(2);
+            item.recipient = groupName;
+            item.text = columnText(3);
+            item.replyToMessageId = sqlite3_column_int64(statement.get(), 4);
+            item.replyToSender = columnText(5);
+            item.replyToText = columnText(6);
+            item.forwardFromMessageId = sqlite3_column_int64(statement.get(), 7);
+            item.forwardFromSender = columnText(8);
+            item.forwardFromText = columnText(9);
+            messages.push_back(item);
+        }
+    }
+
+    long long conversationId = 0;
+    if (!findConversationLocked(user, peer, conversationId, error)) {
+        return false;
+    }
+
+    if (conversationId == 0) {
+        return true;
+    }
+
+    Statement statement(db_,
+                        "SELECT "
+                        "  m.id,"
+                        "  m.created_at,"
+                        "  m.sender,"
+                        "  m.recipient,"
+                        "  m.body,"
+                        "  COALESCE(m.reply_to_message_id, 0),"
+                        "  COALESCE(reply.sender, ''),"
+                        "  COALESCE(reply.body, ''),"
+                        "  COALESCE(m.forward_from_message_id, 0),"
+                        "  COALESCE(fwd.sender, ''),"
+                        "  COALESCE(fwd.body, '') "
+                        "FROM ("
+                        "  SELECT id, created_at, sender, recipient, body, reply_to_message_id, forward_from_message_id "
+                        "  FROM messages "
+                        "  WHERE conversation_id = ? AND id < ? "
+                        "  ORDER BY id DESC "
+                        "  LIMIT ?"
+                        ") m "
+                        "LEFT JOIN messages reply ON reply.id = m.reply_to_message_id "
+                        "LEFT JOIN messages fwd ON fwd.id = m.forward_from_message_id "
+                        "ORDER BY m.id ASC;",
+                        error);
+    if (!statement) {
+        return false;
+    }
+
+    sqlite3_bind_int64(statement.get(), 1, conversationId);
+    sqlite3_bind_int64(statement.get(), 2, beforeMessageId);
+    sqlite3_bind_int(statement.get(), 3, limit);
+
+    while (true) {
+        const int result = sqlite3_step(statement.get());
+        if (result == SQLITE_DONE) {
+            return true;
+        }
+
+        if (result != SQLITE_ROW) {
+            error = lastError(db_);
+            return false;
+        }
+
+        auto columnText = [&](int column) -> std::string {
+            const auto* value = sqlite3_column_text(statement.get(), column);
+            return value ? reinterpret_cast<const char*>(value) : "";
+        };
+
+        messages.push_back({
+            sqlite3_column_int64(statement.get(), 0),
+            columnText(1),
+            columnText(2),
+            columnText(3),
+            columnText(4),
+            sqlite3_column_int64(statement.get(), 5),
+            columnText(6),
+            columnText(7),
+            sqlite3_column_int64(statement.get(), 8),
+            columnText(9),
+            columnText(10)
+        });
+    }
+}
+
 bool MessageStore::markConversationRead(const std::string& user,
                                         const std::string& peer,
                                         std::string& error) {

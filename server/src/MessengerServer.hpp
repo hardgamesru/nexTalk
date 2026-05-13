@@ -109,6 +109,13 @@ private:
                             const common::ProtocolMessage& message);
 
     /**
+     * Обрабатывает команду fetch_history_before и подгружает более старые
+     * сообщения относительно указанного message id.
+     */
+    void handleFetchHistoryBefore(const std::shared_ptr<ClientSession>& session,
+                                  const common::ProtocolMessage& message);
+
+    /**
      * Отправляет список диалогов пользователя с последними сообщениями.
      */
     void handleFetchChats(const std::shared_ptr<ClientSession>& session,

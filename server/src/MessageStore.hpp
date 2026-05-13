@@ -96,6 +96,12 @@ public:
                       int limit,
                       std::vector<StoredMessage>& messages,
                       std::string& error);
+    bool fetchHistoryBefore(const std::string& user,
+                            const std::string& peer,
+                            long long beforeMessageId,
+                            int limit,
+                            std::vector<StoredMessage>& messages,
+                            std::string& error);
     bool markConversationRead(const std::string& user,
                               const std::string& peer,
                               std::string& error);

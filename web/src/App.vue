@@ -1,5 +1,14 @@
 <script setup lang="ts">
 import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
+import { CACHE_LIMIT_PER_CHAT, HISTORY_PAGE_SIZE } from "./cacheConfig";
+import {
+  loadCachedMessages,
+  openMessageCacheDb,
+  saveMessageToCache,
+  saveMessagesToCache,
+  trimCachedMessages,
+  type ChatMessage,
+} from "./messageCache";
 
 type ProtocolMessage = {
   command: string;
@@ -15,21 +24,6 @@ type ChatItem = {
   lastText: string;
   unreadCount: number;
   canManage: boolean;
-};
-
-type ChatMessage = {
-  id: number;
-  chatId: string;
-  createdAt: string;
-  sender: string;
-  recipient: string;
-  text: string;
-  replyToMessageId: number | null;
-  replyToSender: string;
-  replyToText: string;
-  forwardFromMessageId: number | null;
-  forwardFromSender: string;
-  forwardFromText: string;
 };
 
 type SearchUser = {
@@ -71,7 +65,6 @@ const connection = reactive({
 const ui = reactive({
   messageDraft: "",
   chatFilter: "",
-  historyLimit: 30,
   showNewChatChoice: false,
   showAddChat: false,
   showCreateGroup: false,
@@ -116,6 +109,13 @@ const messagesViewport = ref<HTMLElement | null>(null);
 const logsViewport = ref<HTMLElement | null>(null);
 const stickMessagesToBottom = ref(true);
 const stickLogsToBottom = ref(true);
+const loadingOlderByPeer = reactive<Record<string, boolean>>({});
+const reachedHistoryStartByPeer = reactive<Record<string, boolean>>({});
+
+const syncingRecentByPeer: Record<string, boolean> = {};
+const historyRequestModeByPeer: Record<string, "latest" | "older"> = {};
+const historyBatchCountByPeer: Record<string, number> = {};
+const olderScrollStateByPeer: Record<string, { oldScrollHeight: number; oldScrollTop: number }> = {};
 
 let ws: WebSocket | null = null;
 let pendingAuth: { mode: "login" | "register"; username: string; password: string } | null = null;
@@ -229,6 +229,57 @@ function peerForMessage(message: ChatMessage) {
   return message.chatId || (message.sender === session.currentUser ? message.recipient : message.sender);
 }
 
+function dedupeAndSortMessages(messages: ChatMessage[]) {
+  const messageMap = new Map<number, ChatMessage>();
+  for (const message of messages) {
+    messageMap.set(message.id, message);
+  }
+  return Array.from(messageMap.values()).sort((left, right) => left.id - right.id);
+}
+
+function scrollMessagesToBottom() {
+  if (messagesViewport.value) {
+    messagesViewport.value.scrollTop = messagesViewport.value.scrollHeight;
+  }
+}
+
+function clearRecord(record: Record<string, unknown>) {
+  Object.keys(record).forEach((key) => {
+    delete record[key];
+  });
+}
+
+function setMessagesForPeer(peer: string, messages: ChatMessage[]) {
+  messagesByPeer[peer] = dedupeAndSortMessages(messages);
+}
+
+async function persistRecentMessages(peer: string) {
+  if (!session.currentUser) {
+    return;
+  }
+
+  const recentMessages = (messagesByPeer[peer] ?? []).slice(-CACHE_LIMIT_PER_CHAT);
+  try {
+    await saveMessagesToCache(session.currentUser, peer, recentMessages);
+    await trimCachedMessages(session.currentUser, peer, CACHE_LIMIT_PER_CHAT);
+  } catch (error) {
+    console.error("Failed to persist cached messages", error);
+  }
+}
+
+async function persistSingleMessage(peer: string, message: ChatMessage) {
+  if (!session.currentUser) {
+    return;
+  }
+
+  try {
+    await saveMessageToCache(session.currentUser, peer, message);
+    await trimCachedMessages(session.currentUser, peer, CACHE_LIMIT_PER_CHAT);
+  } catch (error) {
+    console.error("Failed to persist cached message", error);
+  }
+}
+
 function excerpt(value: string, limit = 90) {
   const normalized = value.replace(/\s+/g, " ").trim();
   if (normalized.length <= limit) {
@@ -333,12 +384,14 @@ function clearSessionData() {
   ui.groupAddSearchQuery = "";
   ui.groupAddSearchResults = [];
   searchResults.value = [];
-  Object.keys(chatIndex).forEach((key) => {
-    delete chatIndex[key];
-  });
-  Object.keys(messagesByPeer).forEach((key) => {
-    delete messagesByPeer[key];
-  });
+  clearRecord(chatIndex);
+  clearRecord(messagesByPeer);
+  clearRecord(loadingOlderByPeer);
+  clearRecord(reachedHistoryStartByPeer);
+  clearRecord(syncingRecentByPeer);
+  clearRecord(historyRequestModeByPeer);
+  clearRecord(historyBatchCountByPeer);
+  clearRecord(olderScrollStateByPeer);
   chats.value = [];
 }
 
@@ -432,7 +485,7 @@ function connectBridge() {
         pushLog(`Protocol parse error: ${payload.line}`);
         return;
       }
-      handleProtocolMessage(parsed);
+      void handleProtocolMessage(parsed);
       return;
     }
 
@@ -474,17 +527,41 @@ function beginAuth(mode: "login" | "register") {
   sendBridge({ type: "connect", host: form.host, port: Number(form.port) });
 }
 
-function selectPeer(peer: string) {
+function requestLatestHistory(peer: string) {
+  if (!session.loggedIn || !peer || syncingRecentByPeer[peer] || loadingOlderByPeer[peer]) {
+    return;
+  }
+
+  syncingRecentByPeer[peer] = true;
+  historyRequestModeByPeer[peer] = "latest";
+  historyBatchCountByPeer[peer] = 0;
+  sendCommand("fetch_history", [peer, String(CACHE_LIMIT_PER_CHAT)]);
+}
+
+async function selectPeer(peer: string) {
   session.selectedPeer = peer;
   ui.replyTarget = null;
   ui.contextMenuVisible = false;
-  messagesByPeer[peer] = [];
-  sendCommand("fetch_history", [peer, String(ui.historyLimit)]);
-  nextTick(() => {
-    if (messagesViewport.value) {
-      messagesViewport.value.scrollTop = messagesViewport.value.scrollHeight;
+
+  const runtimeMessages = messagesByPeer[peer] ?? [];
+  if (runtimeMessages.length === 0 && session.currentUser) {
+    try {
+      const cachedMessages = await loadCachedMessages(session.currentUser, peer);
+      if (session.selectedPeer !== peer) {
+        return;
+      }
+      if (cachedMessages.length > 0) {
+        setMessagesForPeer(peer, cachedMessages);
+      }
+    } catch (error) {
+      console.error("Failed to load cached messages", error);
     }
-  });
+  }
+
+  await nextTick();
+  scrollMessagesToBottom();
+  sendCommand("mark_read", [peer]);
+  requestLatestHistory(peer);
 }
 
 function pushMessage(peer: string, message: ChatMessage) {
@@ -822,6 +899,37 @@ function jumpToMessage(messageId: number | null) {
   });
 }
 
+function loadOlderMessages(peer: string) {
+  if (
+    !session.loggedIn ||
+    !peer ||
+    loadingOlderByPeer[peer] ||
+    syncingRecentByPeer[peer] ||
+    reachedHistoryStartByPeer[peer]
+  ) {
+    return;
+  }
+
+  const messages = messagesByPeer[peer] ?? [];
+  const oldestMessage = messages[0];
+  if (!oldestMessage?.id) {
+    return;
+  }
+
+  const viewport = messagesViewport.value;
+  if (viewport && session.selectedPeer === peer) {
+    olderScrollStateByPeer[peer] = {
+      oldScrollHeight: viewport.scrollHeight,
+      oldScrollTop: viewport.scrollTop,
+    };
+  }
+
+  loadingOlderByPeer[peer] = true;
+  historyRequestModeByPeer[peer] = "older";
+  historyBatchCountByPeer[peer] = 0;
+  sendCommand("fetch_history_before", [peer, String(oldestMessage.id), String(HISTORY_PAGE_SIZE)]);
+}
+
 function onMessagesScroll() {
   const viewport = messagesViewport.value;
   if (!viewport) {
@@ -829,6 +937,9 @@ function onMessagesScroll() {
   }
   const distance = viewport.scrollHeight - viewport.clientHeight - viewport.scrollTop;
   stickMessagesToBottom.value = distance < 28;
+  if (viewport.scrollTop < 80 && session.selectedPeer) {
+    loadOlderMessages(session.selectedPeer);
+  }
 }
 
 function onLogsScroll() {
@@ -881,7 +992,7 @@ function upsertChat(chat: ChatItem) {
   });
 }
 
-function handleProtocolMessage(message: ProtocolMessage) {
+async function handleProtocolMessage(message: ProtocolMessage) {
   const [a = "", b = "", c = "", d = "", e = ""] = message.fields;
   switch (message.command) {
     case "info":
@@ -917,6 +1028,11 @@ function handleProtocolMessage(message: ProtocolMessage) {
         clearSessionData();
         session.loggedIn = true;
         session.currentUser = authCredentials?.username || form.username.trim();
+        try {
+          await openMessageCacheDb(session.currentUser);
+        } catch (error) {
+          console.error("Failed to open message cache", error);
+        }
         fetchChats();
       } else {
         pendingAuth = null;
@@ -937,6 +1053,7 @@ function handleProtocolMessage(message: ProtocolMessage) {
 
         const peer = sentMessage.chatId || peerForMessage(sentMessage);
         pushMessage(peer, sentMessage);
+        await persistSingleMessage(peer, sentMessage);
         sendCommand("mark_read", [peer]);
       } else {
         pushLog(`Send error: ${b}`);
@@ -951,6 +1068,7 @@ function handleProtocolMessage(message: ProtocolMessage) {
 
       const peer = incomingMessage.chatId || peerForMessage(incomingMessage);
       pushMessage(peer, incomingMessage);
+      await persistSingleMessage(peer, incomingMessage);
       if (session.selectedPeer === peer) {
         sendCommand("mark_read", [peer]);
       }
@@ -966,17 +1084,62 @@ function handleProtocolMessage(message: ProtocolMessage) {
 
       const peer = historyMessage.chatId || peerForMessage(historyMessage);
       pushMessage(peer, historyMessage);
-      break;
-    }
-    case "history_result":
-      pushLog(`History ${a}: ${b}`);
-      if (a == "ok") {
-        if (session.selectedPeer) {
-          sendCommand("mark_read", [session.selectedPeer]);
-        }
-        fetchChats();
+      historyBatchCountByPeer[peer] = (historyBatchCountByPeer[peer] ?? 0) + 1;
+      if (historyRequestModeByPeer[peer] !== "older") {
+        await persistSingleMessage(peer, historyMessage);
       }
       break;
+    }
+    case "history_result": {
+      const resultPeer = message.fields[2] ?? "";
+      const resultMode = message.fields[3] === "older" ? "older" : "latest";
+      pushLog(`History ${a}: ${b}`);
+      if (resultPeer) {
+        const loadedCount = historyBatchCountByPeer[resultPeer] ?? 0;
+        if (resultMode === "older") {
+          loadingOlderByPeer[resultPeer] = false;
+          if (loadedCount < HISTORY_PAGE_SIZE) {
+            reachedHistoryStartByPeer[resultPeer] = true;
+          }
+
+          if (a === "ok" && session.selectedPeer === resultPeer) {
+            const scrollState = olderScrollStateByPeer[resultPeer];
+            if (scrollState && messagesViewport.value) {
+              await nextTick();
+              const viewport = messagesViewport.value;
+              if (viewport) {
+                viewport.scrollTop =
+                  scrollState.oldScrollTop + (viewport.scrollHeight - scrollState.oldScrollHeight);
+              }
+            }
+          }
+        } else {
+          syncingRecentByPeer[resultPeer] = false;
+          if (loadedCount < CACHE_LIMIT_PER_CHAT) {
+            reachedHistoryStartByPeer[resultPeer] = true;
+          }
+          if (a === "ok" && session.selectedPeer === resultPeer) {
+            sendCommand("mark_read", [resultPeer]);
+          }
+        }
+
+        delete historyBatchCountByPeer[resultPeer];
+        delete historyRequestModeByPeer[resultPeer];
+        delete olderScrollStateByPeer[resultPeer];
+      }
+
+      if (a === "ok") {
+        if (resultPeer && resultMode !== "older") {
+          await persistRecentMessages(resultPeer);
+        }
+        fetchChats();
+      } else if (resultMode === "older" && resultPeer) {
+        loadingOlderByPeer[resultPeer] = false;
+      } else if (resultPeer) {
+        syncingRecentByPeer[resultPeer] = false;
+      }
+      break;
+    }
     case "chat_item":
       upsertChat({
         peerId: a,
@@ -1038,6 +1201,12 @@ function handleProtocolMessage(message: ProtocolMessage) {
         delete chatIndex[removedPeer];
         chats.value = Object.values(chatIndex);
         delete messagesByPeer[removedPeer];
+        delete loadingOlderByPeer[removedPeer];
+        delete reachedHistoryStartByPeer[removedPeer];
+        delete syncingRecentByPeer[removedPeer];
+        delete historyRequestModeByPeer[removedPeer];
+        delete historyBatchCountByPeer[removedPeer];
+        delete olderScrollStateByPeer[removedPeer];
         if (session.selectedPeer === removedPeer) {
           session.selectedPeer = "";
           ui.replyTarget = null;
@@ -1089,6 +1258,12 @@ function handleProtocolMessage(message: ProtocolMessage) {
       delete chatIndex[removedChatId];
       chats.value = Object.values(chatIndex);
       delete messagesByPeer[removedChatId];
+      delete loadingOlderByPeer[removedChatId];
+      delete reachedHistoryStartByPeer[removedChatId];
+      delete syncingRecentByPeer[removedChatId];
+      delete historyRequestModeByPeer[removedChatId];
+      delete historyBatchCountByPeer[removedChatId];
+      delete olderScrollStateByPeer[removedChatId];
       if (session.selectedPeer === removedChatId) {
         session.selectedPeer = "";
       }
@@ -1176,13 +1351,13 @@ watch(
         </div>
         <div class="top-actions">
           <button v-if="canOpenGroupSettings" class="small" @click="openGroupSettings">People</button>
-          <label>History limit</label>
-          <input v-model.number="ui.historyLimit" type="number" min="1" max="100" />
-          <button class="small" @click="fetchChats" :disabled="!session.loggedIn">Refresh</button>
         </div>
       </header>
 
       <section ref="messagesViewport" class="messages" @scroll="onMessagesScroll">
+        <div v-if="session.selectedPeer && loadingOlderByPeer[session.selectedPeer]" class="history-loading">
+          Loading older messages...
+        </div>
         <div v-if="!session.selectedPeer" class="empty-chat">
           <p>Выберите чат в списке слева, чтобы увидеть переписку.</p>
         </div>

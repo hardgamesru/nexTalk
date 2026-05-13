@@ -86,6 +86,25 @@ fetch_history<TAB>group:3<TAB>20
 2. лимит сообщений, необязательное поле. Если не передан, сервер использует
    значение по умолчанию. Сервер ограничивает слишком большие значения.
 
+Команда возвращает последние сообщения чата и используется как для обычной
+загрузки истории, так и для синхронизации локального IndexedDB-кэша web-клиента.
+
+### fetch_history_before
+
+```text
+fetch_history_before<TAB>bob<TAB>42<TAB>5
+fetch_history_before<TAB>group:3<TAB>120<TAB>5
+```
+
+Запрашивает более старые сообщения: все, у которых `message_id` меньше
+указанного значения.
+
+Поля:
+
+1. `chat_id`: username собеседника или `group:<id>`;
+2. `before_message_id`: id сообщения, относительно которого идет поиск назад;
+3. лимит сообщений.
+
 ### fetch_chats
 
 ```text
@@ -308,15 +327,19 @@ history_message<TAB>42<TAB>bob<TAB>2026-05-07 12:00:00<TAB>alice<TAB>bob<TAB>П�
 ### history_result
 
 ```text
-history_result<TAB>ok<TAB>history with bob: 1 message(s)
+history_result<TAB>ok<TAB>history with bob: 1 message(s)<TAB>bob<TAB>latest
+history_result<TAB>ok<TAB>history before bob: 5 message(s)<TAB>bob<TAB>older
 ```
 
-Завершает ответ на `fetch_history`.
+Завершает ответ на `fetch_history` или `fetch_history_before`.
 
 Поля:
 
 1. статус: `ok` или `error`;
 2. описание результата.
+3. `chat_id`, если сервер смог его определить;
+4. режим выдачи: `latest` для обычного запроса последних сообщений или `older`
+   для подгрузки истории вверх.
 
 ### chat_item
 
@@ -495,5 +518,7 @@ S -> bob: incoming_message<TAB>42<TAB>alice<TAB>2026-05-07 12:00:00<TAB>alice<TA
 S -> alice: info<TAB>delivered to bob
 C -> S: fetch_history<TAB>bob<TAB>20
 S -> C: history_message<TAB>42<TAB>bob<TAB>2026-05-07 12:00:00<TAB>alice<TAB>bob<TAB>Привет<TAB><TAB><TAB><TAB><TAB><TAB>
-S -> C: history_result<TAB>ok<TAB>history with bob: 1 message(s)
+S -> C: history_result<TAB>ok<TAB>history with bob: 1 message(s)<TAB>bob<TAB>latest
+C -> S: fetch_history_before<TAB>bob<TAB>42<TAB>5
+S -> C: history_result<TAB>ok<TAB>history before bob: 0 message(s)<TAB>bob<TAB>older
 ```
