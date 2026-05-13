@@ -53,9 +53,20 @@ type AuthMode = "choice" | "login" | "register";
 const DELETED_MESSAGE_TEXT = "Сообщение удалено";
 const AI_CHAT_ID = "__ai__";
 const AI_CHAT_NAME = "NexTalk AI";
-const AI_CONTEXT_LIMIT = 24;
+const AI_CONTEXT_LIMIT = 12;
 const AI_SYSTEM_PROMPT =
-  "You are NexTalk AI, a helpful assistant embedded in a messenger. Answer clearly and safely. When the user forwards a message, focus on the forwarded content and the user's instruction.";
+  "You are NexTalk AI, a helpful assistant inside a messenger. Focus on the user's latest request and any forwarded message attached to it. Reply directly, naturally, and in the same language as the user's latest message unless the user explicitly asks for another language. Do not add meta-introductions like 'Here is the answer'.";
+const AI_REWRITE_PRESETS = [
+  "Formal",
+  "Friendly",
+  "Shorter",
+  "More detailed",
+  "Funny",
+  "Apologetic",
+  "Confident",
+  "Fix grammar",
+  "Translate to English",
+] as const;
 
 const bridgeUrl = computed(() => `ws://${window.location.hostname}:5174`);
 const aiServiceUrl = computed(() => `http://${window.location.hostname}:5000`);
@@ -134,6 +145,11 @@ const ui = reactive({
   aiReplySourceMessage: null as ChatMessage | null,
   aiReplyInstruction: "",
   aiReplySuggestion: "",
+  aiRewriteMenuOpen: false,
+  aiRewriteLoading: false,
+  aiRewriteError: "",
+  aiRewriteCustomOpen: false,
+  aiRewriteCustomInstruction: "",
   aiPendingAttachment: null as AIAttachment | null,
   profileForm: {
     username: "",
@@ -233,6 +249,21 @@ const canOpenGroupSettings = computed(() => {
 
 const canOpenDirectProfile = computed(() => {
   return !isAiChatSelected.value && selectedChat.value?.kind === "dm";
+});
+
+const selectedDirectProfile = computed(() => {
+  if (!canOpenDirectProfile.value || !selectedChat.value) {
+    return null;
+  }
+  return profilesByUsername[selectedChat.value.peerId] ?? fallbackProfile(selectedChat.value.peerId);
+});
+
+const selectedDirectPresenceText = computed(() => {
+  return formatLastSeen(selectedDirectProfile.value);
+});
+
+const selectedDirectPresenceOnline = computed(() => {
+  return Boolean(selectedDirectProfile.value?.online);
 });
 
 const profileInitial = computed(() => {
@@ -554,7 +585,7 @@ async function generateAiReply() {
       {
         role: "system",
         content:
-          "You generate short, useful draft replies for messenger chats. Return only the suggested reply text, without explanations or quotes unless the user asks for them.",
+          "Generate a natural chat reply draft. Keep the same language as the source message unless the user explicitly asks for another language. Return only the reply text, without explanations or intro phrases.",
       },
       {
         role: "user",
@@ -577,6 +608,78 @@ function insertAiReplyToChat() {
   }
   ui.messageDraft = ui.aiReplySuggestion.trim();
   closeAiReplyModal();
+}
+
+function closeAiRewriteMenu() {
+  ui.aiRewriteMenuOpen = false;
+  ui.aiRewriteLoading = false;
+  ui.aiRewriteCustomOpen = false;
+  ui.aiRewriteCustomInstruction = "";
+}
+
+function toggleAiRewriteMenu() {
+  if (!session.loggedIn || !session.selectedPeer || isAiChatSelected.value) {
+    return;
+  }
+
+  if (!ui.messageDraft.trim()) {
+    ui.aiRewriteMenuOpen = false;
+    return;
+  }
+
+  ui.aiRewriteError = "";
+  ui.aiRewriteMenuOpen = !ui.aiRewriteMenuOpen;
+  if (!ui.aiRewriteMenuOpen) {
+    ui.aiRewriteCustomOpen = false;
+    ui.aiRewriteCustomInstruction = "";
+  }
+}
+
+async function rewriteDraftWithAi(instruction: string) {
+  const draft = ui.messageDraft.trim();
+  if (!draft) {
+    ui.aiRewriteError = "Write a draft first";
+    return;
+  }
+
+  ui.aiRewriteLoading = true;
+  ui.aiRewriteError = "";
+  try {
+    const answer = await requestAiAnswer([
+      {
+        role: "system",
+        content:
+          "Rewrite a chat message draft. Keep the same language as the original draft unless the user explicitly asks for translation. Return only the rewritten message text, without explanations or intro phrases.",
+      },
+      {
+        role: "user",
+        content: `Rewrite this message draft with the following instruction:\n${instruction}\n\nDraft:\n${draft}`,
+      },
+    ]);
+    ui.messageDraft = answer;
+    closeAiRewriteMenu();
+  } catch (error) {
+    ui.aiRewriteError = error instanceof Error ? error.message : "AI rewrite failed";
+  } finally {
+    ui.aiRewriteLoading = false;
+  }
+}
+
+function chooseAiRewritePreset(preset: (typeof AI_REWRITE_PRESETS)[number]) {
+  void rewriteDraftWithAi(preset);
+}
+
+function openCustomAiRewrite() {
+  ui.aiRewriteCustomOpen = true;
+  ui.aiRewriteError = "";
+}
+
+function submitCustomAiRewrite() {
+  const instruction = ui.aiRewriteCustomInstruction.trim();
+  if (!instruction) {
+    return;
+  }
+  void rewriteDraftWithAi(instruction);
 }
 
 function fallbackProfile(username: string): UserProfile {
@@ -1037,6 +1140,11 @@ function clearSessionData() {
   ui.aiReplySourceMessage = null;
   ui.aiReplyInstruction = "";
   ui.aiReplySuggestion = "";
+  ui.aiRewriteMenuOpen = false;
+  ui.aiRewriteLoading = false;
+  ui.aiRewriteError = "";
+  ui.aiRewriteCustomOpen = false;
+  ui.aiRewriteCustomInstruction = "";
   ui.aiPendingAttachment = null;
   ui.profileForm.username = "";
   ui.profileForm.displayName = "";
@@ -1739,8 +1847,14 @@ function signOut() {
   resetToWelcome();
 }
 
-const dismissMenus = () => {
+const dismissMenus = (event?: Event) => {
+  const target = event?.target as HTMLElement | null;
+  if (target && target.closest(".composer-ai-wrap")) {
+    closeContextMenu();
+    return;
+  }
   closeContextMenu();
+  closeAiRewriteMenu();
 };
 
 onMounted(() => {
@@ -2253,6 +2367,14 @@ watch(
           </p>
         </div>
         <div class="top-actions">
+          <div
+            v-if="canOpenDirectProfile && selectedDirectPresenceText"
+            class="presence-pill"
+            :class="{ online: selectedDirectPresenceOnline }"
+          >
+            <span class="presence-dot"></span>
+            <span>{{ selectedDirectPresenceText }}</span>
+          </div>
           <button v-if="isAiChatSelected" class="small" @click="clearAiChat">Clear</button>
           <button v-if="canOpenDirectProfile && selectedChat" class="small" @click="openUserProfile(selectedChat.peerId)">Profile</button>
           <button v-if="canOpenGroupSettings" class="small" @click="openGroupSettings">People</button>
@@ -2391,6 +2513,58 @@ watch(
               :disabled="(!session.selectedPeer || !session.loggedIn) || ui.aiSending"
               @keydown.enter.prevent="sendMessage"
             />
+            <div class="composer-ai-wrap">
+              <button
+                class="small composer-ai-btn ai-accent-btn"
+                type="button"
+                @click.stop="toggleAiRewriteMenu"
+                :disabled="
+                  !session.selectedPeer ||
+                  !session.loggedIn ||
+                  isAiChatSelected ||
+                  ui.aiSending ||
+                  ui.aiRewriteLoading ||
+                  !ui.messageDraft.trim()
+                "
+              >
+                {{ ui.aiRewriteLoading ? "AI..." : "AI" }}
+              </button>
+              <div v-if="ui.aiRewriteMenuOpen" class="ai-rewrite-menu" @click.stop>
+                <div class="ai-rewrite-grid">
+                  <button
+                    v-for="preset in AI_REWRITE_PRESETS"
+                    :key="preset"
+                    class="ai-rewrite-item"
+                    type="button"
+                    :disabled="ui.aiRewriteLoading"
+                    @click="chooseAiRewritePreset(preset)"
+                  >
+                    {{ preset }}
+                  </button>
+                  <button class="ai-rewrite-item ai-rewrite-custom-toggle" type="button" :disabled="ui.aiRewriteLoading" @click="openCustomAiRewrite">
+                    Custom...
+                  </button>
+                </div>
+                <div v-if="ui.aiRewriteCustomOpen" class="ai-rewrite-custom">
+                  <input
+                    v-model="ui.aiRewriteCustomInstruction"
+                    type="text"
+                    placeholder="Describe how to rewrite it"
+                    :disabled="ui.aiRewriteLoading"
+                    @keydown.enter.prevent="submitCustomAiRewrite"
+                  />
+                  <button
+                    class="small ai-rewrite-apply-btn ai-accent-btn"
+                    type="button"
+                    :disabled="ui.aiRewriteLoading || !ui.aiRewriteCustomInstruction.trim()"
+                    @click="submitCustomAiRewrite"
+                  >
+                    Apply
+                  </button>
+                </div>
+                <p v-if="ui.aiRewriteError" class="ai-rewrite-error">{{ ui.aiRewriteError }}</p>
+              </div>
+            </div>
             <button
               class="primary"
               @click="sendMessage"
@@ -2553,7 +2727,7 @@ watch(
           ></textarea>
         </div>
         <div class="modal-actions ai-reply-top-actions">
-          <button class="primary ai-reply-generate-btn" @click="generateAiReply" :disabled="ui.aiReplyLoading">
+          <button class="primary ai-reply-generate-btn ai-accent-btn" @click="generateAiReply" :disabled="ui.aiReplyLoading">
             {{ ui.aiReplyLoading ? "Generating..." : "Generate" }}
           </button>
         </div>
