@@ -31,6 +31,16 @@ type SearchUser = {
   username: string;
 };
 
+type UserProfile = {
+  username: string;
+  displayName: string;
+  bio: string;
+  avatarColor: string;
+  createdAt: string;
+  lastSeen: string;
+  online: boolean;
+};
+
 type AuthMode = "choice" | "login" | "register";
 const DELETED_MESSAGE_TEXT = "Сообщение удалено";
 
@@ -99,11 +109,25 @@ const ui = reactive({
   groupAddSearchQuery: "",
   groupAddSearchInFlight: false,
   groupAddSearchResults: [] as SearchUser[],
+  profileModalOpen: false,
+  profileModalLoading: false,
+  profileViewMode: "view" as "view" | "edit",
+  selectedProfileUsername: "",
+  profileForm: {
+    username: "",
+    displayName: "",
+    bio: "",
+    avatarColor: "#5C7CFA",
+    createdAt: "",
+    lastSeen: "",
+    online: false,
+  },
 });
 
 const chats = ref<ChatItem[]>([]);
 const chatIndex = reactive<Record<string, ChatItem>>({});
 const messagesByPeer = reactive<Record<string, ChatMessage[]>>({});
+const profilesByUsername = reactive<Record<string, UserProfile>>({});
 const searchResults = ref<SearchUser[]>([]);
 const pendingSearchQuery = ref("");
 const messagesViewport = ref<HTMLElement | null>(null);
@@ -125,6 +149,7 @@ let ws: WebSocket | null = null;
 let pendingAuth: { mode: "login" | "register"; username: string; password: string } | null = null;
 let authCredentials: { username: string; password: string } | null = null;
 let highlightTimer: number | null = null;
+let pendingProfilesBatch = new Set<string>();
 
 const filteredChats = computed(() => {
   const query = ui.chatFilter.trim().toLowerCase();
@@ -134,8 +159,8 @@ const filteredChats = computed(() => {
 
   return chats.value.filter((chat) => {
     return (
-      chat.peer.toLowerCase().includes(query) ||
-      `${chat.lastSender}: ${chat.lastText}`.toLowerCase().includes(query)
+      chatDisplayName(chat).toLowerCase().includes(query) ||
+      `${chatPreviewSenderLabel(chat)}: ${chat.lastText}`.toLowerCase().includes(query)
     );
   });
 });
@@ -154,15 +179,28 @@ const selectedChat = computed(() => {
 });
 
 const selectedChatTitle = computed(() => {
-  return selectedChat.value?.peer ?? "";
+  if (!selectedChat.value) {
+    return "";
+  }
+  return selectedChat.value.kind === "dm"
+    ? getProfileDisplayName(selectedChat.value.peerId)
+    : selectedChat.value.peer;
 });
 
 const canOpenGroupSettings = computed(() => {
   return selectedChat.value?.kind === "group";
 });
 
+const canOpenDirectProfile = computed(() => {
+  return selectedChat.value?.kind === "dm";
+});
+
 const profileInitial = computed(() => {
-  return (session.currentUser || "?").slice(0, 1).toUpperCase();
+  return getProfileInitials(session.currentUser || "?");
+});
+
+const currentUserAvatarColor = computed(() => {
+  return getProfileAvatarColor(session.currentUser || "?");
 });
 
 const forwardableChats = computed(() => {
@@ -200,6 +238,218 @@ function formatServerTime(value: string) {
   }
 
   return parsed.toLocaleString();
+}
+
+function stableAvatarColor(username: string) {
+  const palette = ["#5C7CFA", "#E56B6F", "#3FA37A", "#F4A261", "#7B6CF6", "#4D908E", "#577590", "#BC6C25", "#C8553D", "#8A5CF6"];
+  let hash = 2166136261;
+  for (let index = 0; index < username.length; index += 1) {
+    hash ^= username.charCodeAt(index);
+    hash = Math.imul(hash, 16777619);
+  }
+  return palette[Math.abs(hash) % palette.length];
+}
+
+function computeInitials(displayName: string, username: string) {
+  const source = (displayName || username).trim();
+  if (!source) {
+    return "?";
+  }
+
+  const parts = source.split(/\s+/).filter(Boolean);
+  if (parts.length >= 2) {
+    return `${parts[0][0] ?? ""}${parts[1][0] ?? ""}`.toUpperCase();
+  }
+  return source.slice(0, 2).toUpperCase();
+}
+
+function fallbackProfile(username: string): UserProfile {
+  return {
+    username,
+    displayName: username,
+    bio: "",
+    avatarColor: stableAvatarColor(username),
+    createdAt: "",
+    lastSeen: "",
+    online: false,
+  };
+}
+
+function applyProfileFromFields(fields: string[]) {
+  const username = fields[0] ?? "";
+  if (!username) {
+    return null;
+  }
+
+  const profile: UserProfile = {
+    username,
+    displayName: fields[1] || username,
+    bio: fields[2] || "",
+    avatarColor: fields[3] || stableAvatarColor(username),
+    createdAt: fields[4] || "",
+    lastSeen: fields[5] || "",
+    online: (fields[6] ?? "0") === "1",
+  };
+
+  profilesByUsername[username] = profile;
+
+  if (ui.selectedProfileUsername === username) {
+    ui.profileForm.username = profile.username;
+    ui.profileForm.displayName = profile.displayName;
+    ui.profileForm.bio = profile.bio;
+    ui.profileForm.avatarColor = profile.avatarColor;
+    ui.profileForm.createdAt = profile.createdAt;
+    ui.profileForm.lastSeen = profile.lastSeen;
+    ui.profileForm.online = profile.online;
+    ui.profileModalLoading = false;
+  }
+
+  return profile;
+}
+
+function requestProfile(username: string) {
+  const trimmedUsername = username.trim();
+  if (!session.loggedIn || !trimmedUsername) {
+    return;
+  }
+  sendCommand("get_profile", [trimmedUsername]);
+}
+
+function requestProfiles(usernames: string[]) {
+  if (!session.loggedIn) {
+    return;
+  }
+
+  const unique = Array.from(new Set(usernames.map((username) => username.trim()).filter(Boolean)));
+  const missing = unique.filter((username) => !profilesByUsername[username] && !pendingProfilesBatch.has(username));
+  if (missing.length === 0) {
+    return;
+  }
+
+  missing.forEach((username) => pendingProfilesBatch.add(username));
+  sendCommand("get_profiles", [missing.join(",")]);
+}
+
+function getProfileDisplayName(username: string) {
+  return profilesByUsername[username]?.displayName || username;
+}
+
+function getProfileInitials(username: string) {
+  const profile = profilesByUsername[username] ?? fallbackProfile(username);
+  return computeInitials(profile.displayName, profile.username);
+}
+
+function getProfileAvatarColor(username: string) {
+  return profilesByUsername[username]?.avatarColor || stableAvatarColor(username);
+}
+
+function formatLastSeen(profile: UserProfile | null) {
+  if (!profile) {
+    return "";
+  }
+  if (profile.online) {
+    return "online";
+  }
+  if (!profile.lastSeen) {
+    return "offline";
+  }
+  return `last seen ${formatServerTime(profile.lastSeen)}`;
+}
+
+function formatProfileFormStatus() {
+  return formatLastSeen({
+    username: ui.profileForm.username,
+    displayName: ui.profileForm.displayName,
+    bio: ui.profileForm.bio,
+    avatarColor: ui.profileForm.avatarColor,
+    createdAt: ui.profileForm.createdAt,
+    lastSeen: ui.profileForm.lastSeen,
+    online: ui.profileForm.online,
+  });
+}
+
+function openOwnProfileEditor() {
+  const username = session.currentUser;
+  if (!username) {
+    return;
+  }
+
+  const profile = profilesByUsername[username] ?? fallbackProfile(username);
+  ui.profileViewMode = "edit";
+  ui.selectedProfileUsername = username;
+  ui.profileModalOpen = true;
+  ui.profileModalLoading = !profilesByUsername[username];
+  ui.profileForm.username = username;
+  ui.profileForm.displayName = profile.displayName;
+  ui.profileForm.bio = profile.bio;
+  ui.profileForm.avatarColor = profile.avatarColor;
+  ui.profileForm.createdAt = profile.createdAt;
+  ui.profileForm.lastSeen = profile.lastSeen;
+  ui.profileForm.online = profile.online;
+  requestProfile(username);
+}
+
+function openUserProfile(username: string) {
+  const trimmedUsername = username.trim();
+  if (!trimmedUsername) {
+    return;
+  }
+
+  if (trimmedUsername === session.currentUser) {
+    openOwnProfileEditor();
+    return;
+  }
+
+  const profile = profilesByUsername[trimmedUsername] ?? fallbackProfile(trimmedUsername);
+  ui.profileViewMode = "view";
+  ui.selectedProfileUsername = trimmedUsername;
+  ui.profileModalOpen = true;
+  ui.profileModalLoading = !profilesByUsername[trimmedUsername];
+  ui.profileForm.username = trimmedUsername;
+  ui.profileForm.displayName = profile.displayName;
+  ui.profileForm.bio = profile.bio;
+  ui.profileForm.avatarColor = profile.avatarColor;
+  ui.profileForm.createdAt = profile.createdAt;
+  ui.profileForm.lastSeen = profile.lastSeen;
+  ui.profileForm.online = profile.online;
+  requestProfile(trimmedUsername);
+}
+
+function closeProfileModal() {
+  ui.profileModalOpen = false;
+  ui.profileModalLoading = false;
+  ui.selectedProfileUsername = "";
+}
+
+function saveOwnProfile() {
+  if (!session.currentUser) {
+    return;
+  }
+  sendCommand("update_profile", [
+    ui.profileForm.displayName.trim(),
+    ui.profileForm.bio.trim(),
+    ui.profileForm.avatarColor.trim(),
+  ]);
+}
+
+function chatDisplayName(chat: ChatItem) {
+  return chat.kind === "dm" ? getProfileDisplayName(chat.peerId) : chat.peer;
+}
+
+function chatPreviewSenderLabel(chat: ChatItem) {
+  if (!chat.lastSender) {
+    return "";
+  }
+  return getProfileDisplayName(chat.lastSender);
+}
+
+function chatPreview(chat: ChatItem) {
+  if (!chat.lastText) {
+    return "No messages yet";
+  }
+
+  const sender = chatPreviewSenderLabel(chat);
+  return sender ? `${sender}: ${chat.lastText}` : chat.lastText;
 }
 
 function parseChatMessage(fields: string[], offset = 0) {
@@ -460,9 +710,21 @@ function clearSessionData() {
   ui.groupSettingsMembers = [];
   ui.groupAddSearchQuery = "";
   ui.groupAddSearchResults = [];
+  ui.profileModalOpen = false;
+  ui.profileModalLoading = false;
+  ui.profileViewMode = "view";
+  ui.selectedProfileUsername = "";
+  ui.profileForm.username = "";
+  ui.profileForm.displayName = "";
+  ui.profileForm.bio = "";
+  ui.profileForm.avatarColor = "#5C7CFA";
+  ui.profileForm.createdAt = "";
+  ui.profileForm.lastSeen = "";
+  ui.profileForm.online = false;
   searchResults.value = [];
   clearRecord(chatIndex);
   clearRecord(messagesByPeer);
+  clearRecord(profilesByUsername);
   clearRecord(loadingOlderByPeer);
   clearRecord(reachedHistoryStartByPeer);
   clearRecord(syncingRecentByPeer);
@@ -470,6 +732,7 @@ function clearSessionData() {
   clearRecord(historyBatchCountByPeer);
   clearRecord(olderScrollStateByPeer);
   chats.value = [];
+  pendingProfilesBatch.clear();
 }
 
 function clearHighlightTimer() {
@@ -620,6 +883,11 @@ async function selectPeer(peer: string) {
   ui.replyTarget = null;
   ui.contextMenuVisible = false;
 
+  const selected = chatIndex[peer];
+  if (selected?.kind === "dm") {
+    requestProfile(peer);
+  }
+
   const runtimeMessages = messagesByPeer[peer] ?? [];
   if (runtimeMessages.length === 0 && session.currentUser) {
     try {
@@ -629,10 +897,13 @@ async function selectPeer(peer: string) {
       }
       if (cachedMessages.length > 0) {
         setMessagesForPeer(peer, cachedMessages);
+        requestProfiles(cachedMessages.map((item) => item.sender));
       }
     } catch (error) {
       console.error("Failed to load cached messages", error);
     }
+  } else if (runtimeMessages.length > 0) {
+    requestProfiles(runtimeMessages.map((item) => item.sender));
   }
 
   await nextTick();
@@ -1179,6 +1450,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         } catch (error) {
           console.error("Failed to open message cache", error);
         }
+        requestProfile(session.currentUser);
         fetchChats();
       } else {
         pendingAuth = null;
@@ -1199,6 +1471,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
 
         const peer = sentMessage.chatId || peerForMessage(sentMessage);
         pushMessage(peer, sentMessage);
+        requestProfiles([sentMessage.sender]);
         await persistSingleMessage(peer, sentMessage);
         if (!updateChatPreviewFromMessage(peer, sentMessage, 0)) {
           fetchChats();
@@ -1217,6 +1490,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
 
       const peer = incomingMessage.chatId || peerForMessage(incomingMessage);
       pushMessage(peer, incomingMessage);
+      requestProfiles([incomingMessage.sender]);
       await persistSingleMessage(peer, incomingMessage);
       if (session.selectedPeer === peer) {
         updateChatPreviewFromMessage(peer, incomingMessage, 0);
@@ -1235,6 +1509,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
 
       const peer = historyMessage.chatId || peerForMessage(historyMessage);
       pushMessage(peer, historyMessage);
+      requestProfiles([historyMessage.sender]);
       historyBatchCountByPeer[peer] = (historyBatchCountByPeer[peer] ?? 0) + 1;
       if (historyRequestModeByPeer[peer] !== "older") {
         await persistSingleMessage(peer, historyMessage);
@@ -1318,6 +1593,12 @@ async function handleProtocolMessage(message: ProtocolMessage) {
     case "chat_item":
       if (chatFetchInFlight) {
         chatFetchSeenPeerIds.add(a);
+      }
+      if (c !== "group") {
+        requestProfile(a);
+      }
+      if (e) {
+        requestProfiles([e]);
       }
       upsertChat({
         peerId: a,
@@ -1413,7 +1694,36 @@ async function handleProtocolMessage(message: ProtocolMessage) {
     case "group_member_item":
       if (a === ui.groupSettingsChatId) {
         ui.groupSettingsMembers.push({ username: b, isAdmin: c === "1" });
+        requestProfile(b);
       }
+      break;
+    case "profile_result":
+      if (a === "ok") {
+        applyProfileFromFields(message.fields.slice(1));
+        pendingProfilesBatch.delete(message.fields[1] ?? "");
+      } else {
+        ui.profileModalLoading = false;
+        pushLog(`Profile error: ${b}`);
+      }
+      break;
+    case "update_profile_result":
+      if (a === "ok") {
+        applyProfileFromFields(message.fields.slice(1));
+        ui.profileModalOpen = false;
+        session.profileMenuOpen = false;
+      } else {
+        pushLog(`Update profile error: ${b}`);
+      }
+      break;
+    case "profile_item":
+      applyProfileFromFields(message.fields);
+      pendingProfilesBatch.delete(a);
+      break;
+    case "profiles_result":
+      if (a !== "ok") {
+        pushLog(`Profiles error: ${b}`);
+      }
+      pendingProfilesBatch.clear();
       break;
     case "group_info_result":
       ui.groupSettingsLoading = false;
@@ -1474,14 +1784,21 @@ watch(
         <button
           class="profile-btn"
           :disabled="!session.loggedIn"
+          :style="{ background: currentUserAvatarColor }"
           @click="session.profileMenuOpen = !session.profileMenuOpen"
         >
           {{ profileInitial }}
         </button>
       </div>
       <div v-if="session.profileMenuOpen" class="profile-menu">
-        <strong>{{ session.currentUser }}</strong>
-        <button class="danger small signout-btn" @click="signOut">Sign out</button>
+        <div class="profile-menu-user">
+          <strong>{{ getProfileDisplayName(session.currentUser) }}</strong>
+          <small>@{{ session.currentUser }}</small>
+        </div>
+        <div class="profile-menu-actions">
+          <button class="small" @click="openOwnProfileEditor">Edit profile</button>
+          <button class="danger small signout-btn" @click="signOut">Sign out</button>
+        </div>
       </div>
 
       <section class="panel chats-panel">
@@ -1499,9 +1816,9 @@ watch(
             @click="selectPeer(chat.peerId)"
           >
             <div class="chat-row-main">
-              <strong>{{ chat.kind === "group" ? `${chat.peer}` : chat.peer }}</strong>
+              <strong>{{ chatDisplayName(chat) }}</strong>
               <span class="preview">
-                {{ chat.lastText ? `${chat.lastSender}: ${chat.lastText}` : "No messages yet" }}
+                {{ chatPreview(chat) }}
               </span>
             </div>
             <div class="chat-row-actions">
@@ -1526,6 +1843,7 @@ watch(
           </p>
         </div>
         <div class="top-actions">
+          <button v-if="canOpenDirectProfile && selectedChat" class="small" @click="openUserProfile(selectedChat.peerId)">Profile</button>
           <button v-if="canOpenGroupSettings" class="small" @click="openGroupSettings">People</button>
         </div>
       </header>
@@ -1544,10 +1862,12 @@ watch(
             :data-message-id="message.id"
             @contextmenu="openContextMenu($event, message)"
           >
-            <div class="avatar">{{ (message.sender || "?").slice(0, 1).toUpperCase() }}</div>
+            <div class="avatar" :style="{ background: getProfileAvatarColor(message.sender) }">
+              {{ getProfileInitials(message.sender) }}
+            </div>
             <div class="bubble">
               <div class="meta">
-                <strong>{{ message.sender }}</strong>
+                <strong>{{ getProfileDisplayName(message.sender) }}</strong>
                 <small>{{ formatServerTime(message.createdAt) }}</small>
               </div>
               <button
@@ -1556,7 +1876,7 @@ watch(
                 type="button"
                 @click="openForwardPreview(message)"
               >
-                <strong>Forwarded from {{ message.forwardFromSender || "Unknown" }}</strong>
+                <strong>Forwarded from {{ message.forwardFromSender ? getProfileDisplayName(message.forwardFromSender) : "Unknown" }}</strong>
                 <span>{{ excerpt(message.forwardFromText || message.text) }}</span>
               </button>
               <button
@@ -1565,7 +1885,7 @@ watch(
                 type="button"
                 @click="jumpToMessage(message.replyToMessageId)"
               >
-                <strong>{{ message.replyToSender || "Message" }}</strong>
+                <strong>{{ message.replyToSender ? getProfileDisplayName(message.replyToSender) : "Message" }}</strong>
                 <span>{{ excerpt(message.replyToText || "Deleted message") }}</span>
               </button>
               <p v-if="displayedMessageText(message)" :class="{ 'deleted-copy': isMessageDeleted(message) }">
@@ -1596,7 +1916,7 @@ watch(
         <div class="composer-main">
           <div v-if="ui.replyTarget" class="reply-draft">
             <div class="reply-draft-copy">
-              <strong>{{ ui.replyTarget.sender }}</strong>
+              <strong>{{ getProfileDisplayName(ui.replyTarget.sender) }}</strong>
               <span>{{ excerpt(ui.replyTarget.text) }}</span>
             </div>
             <button class="reply-cancel" @click="cancelReply">x</button>
@@ -1712,7 +2032,7 @@ watch(
         <h3>Forward message</h3>
         <p>Choose who should receive this message and add an optional comment.</p>
         <div class="forward-preview-card">
-          <strong>{{ ui.forwardTarget.sender }}</strong>
+          <strong>{{ getProfileDisplayName(ui.forwardTarget.sender) }}</strong>
           <span>{{ excerpt(ui.forwardTarget.text, 160) }}</span>
         </div>
         <div class="forward-section-title">Кому</div>
@@ -1724,8 +2044,8 @@ watch(
             :class="{ active: ui.forwardRecipient === chat.peerId }"
             @click="selectForwardPeer(chat.peerId)"
           >
-            <strong>{{ chat.peer }}</strong>
-            <span>{{ chat.lastText ? `${chat.lastSender}: ${chat.lastText}` : "No messages yet" }}</span>
+            <strong>{{ chatDisplayName(chat) }}</strong>
+            <span>{{ chatPreview(chat) }}</span>
           </button>
           <p v-if="forwardableChats.length === 0">Create another chat first, then forward messages there.</p>
         </div>
@@ -1748,7 +2068,7 @@ watch(
         <h3>Forwarded message</h3>
         <p>This is the original content preserved inside the forwarded message.</p>
         <div class="forward-view-card">
-          <strong>{{ ui.forwardPreviewMessage.forwardFromSender || "Unknown" }}</strong>
+          <strong>{{ ui.forwardPreviewMessage.forwardFromSender ? getProfileDisplayName(ui.forwardPreviewMessage.forwardFromSender) : "Unknown" }}</strong>
           <span>{{ ui.forwardPreviewMessage.forwardFromText || ui.forwardPreviewMessage.text }}</span>
         </div>
         <div class="modal-actions">
@@ -1766,10 +2086,15 @@ watch(
         <template v-else>
           <div class="search-results">
             <div v-for="member in ui.groupSettingsMembers" :key="`member-${member.username}`" class="group-member-row">
-              <div>
-                <strong>{{ member.username }}</strong>
-                <small>{{ member.isAdmin ? "admin" : "member" }}</small>
-              </div>
+              <button class="member-profile-button" type="button" @click="openUserProfile(member.username)">
+                <span class="avatar small-avatar" :style="{ background: getProfileAvatarColor(member.username) }">
+                  {{ getProfileInitials(member.username) }}
+                </span>
+                <span class="member-copy">
+                  <strong>{{ getProfileDisplayName(member.username) }}</strong>
+                  <small>@{{ member.username }} · {{ member.isAdmin ? "admin" : "member" }}</small>
+                </span>
+              </button>
               <div class="group-member-actions">
                 <button
                   v-if="ui.groupSettingsCanManage && !member.isAdmin && member.username !== session.currentUser"
@@ -1813,6 +2138,60 @@ watch(
           </template>
           <div v-else class="modal-actions">
             <button class="secondary" @click="leaveCurrentGroup">Leave group</button>
+          </div>
+        </template>
+      </div>
+    </section>
+
+    <section v-if="ui.profileModalOpen" class="modal-wrap" @click.self="closeProfileModal">
+      <div class="modal profile-modal">
+        <button class="modal-close" type="button" @click="closeProfileModal" aria-label="Close">x</button>
+        <div class="profile-modal-head">
+          <div class="avatar profile-avatar" :style="{ background: ui.profileForm.avatarColor }">
+            {{ computeInitials(ui.profileForm.displayName, ui.profileForm.username) }}
+          </div>
+          <div>
+            <h3>{{ ui.profileViewMode === "edit" ? "Edit profile" : ui.profileForm.displayName }}</h3>
+            <p>@{{ ui.profileForm.username }}</p>
+          </div>
+        </div>
+
+        <div v-if="ui.profileModalLoading" class="profile-loading">Loading profile...</div>
+
+        <template v-else-if="ui.profileViewMode === 'edit'">
+          <div class="profile-form">
+            <label>Username</label>
+            <input :value="ui.profileForm.username" type="text" readonly />
+            <label>Display name</label>
+            <input v-model="ui.profileForm.displayName" type="text" maxlength="40" />
+            <label>Bio</label>
+            <textarea v-model="ui.profileForm.bio" rows="4" maxlength="160" placeholder="A few words about you"></textarea>
+            <label>Avatar color</label>
+            <div class="color-row">
+              <input v-model="ui.profileForm.avatarColor" type="color" />
+              <span>{{ ui.profileForm.avatarColor }}</span>
+            </div>
+            <div class="profile-facts">
+              <span>Created: {{ ui.profileForm.createdAt ? formatServerTime(ui.profileForm.createdAt) : "unknown" }}</span>
+              <span>Status: {{ formatProfileFormStatus() }}</span>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="small" @click="closeProfileModal">Cancel</button>
+            <button class="primary profile-save-btn" @click="saveOwnProfile" :disabled="!ui.profileForm.displayName.trim()">Save</button>
+          </div>
+        </template>
+
+        <template v-else>
+          <div class="profile-view">
+            <p class="profile-bio">{{ ui.profileForm.bio || "No bio yet." }}</p>
+            <div class="profile-facts">
+              <span>Created: {{ ui.profileForm.createdAt ? formatServerTime(ui.profileForm.createdAt) : "unknown" }}</span>
+              <span>Status: {{ formatProfileFormStatus() }}</span>
+            </div>
+          </div>
+          <div class="modal-actions">
+            <button class="small" @click="closeProfileModal">Close</button>
           </div>
         </template>
       </div>

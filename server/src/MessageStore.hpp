@@ -53,6 +53,15 @@ struct GroupInfo {
     bool canManage{false};
 };
 
+struct UserProfile {
+    std::string username;
+    std::string displayName;
+    std::string bio;
+    std::string avatarColor;
+    std::string createdAt;
+    std::string lastSeen;
+};
+
 /**
  * Small SQLite wrapper for NexTalk server persistence.
  *
@@ -82,6 +91,18 @@ public:
                           std::string& passwordSalt,
                           std::string& error);
     bool userExists(const std::string& username, bool& exists, std::string& error);
+    bool getUserProfile(const std::string& username,
+                        UserProfile& profile,
+                        std::string& error);
+    bool getUserProfiles(const std::vector<std::string>& usernames,
+                         std::vector<UserProfile>& profiles,
+                         std::string& error);
+    bool updateUserProfile(const std::string& username,
+                           const std::string& displayName,
+                           const std::string& bio,
+                           const std::string& avatarColor,
+                           std::string& error);
+    bool updateUserLastSeen(const std::string& username, std::string& error);
     bool saveMessage(const std::string& sender,
                      const std::string& recipient,
                      const std::string& text,

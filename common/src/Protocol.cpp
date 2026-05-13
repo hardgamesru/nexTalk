@@ -114,6 +114,13 @@ namespace common {
         case CommandType::DeleteChatResult: return "delete_chat_result";
         case CommandType::MarkRead: return "mark_read";
         case CommandType::MarkReadResult: return "mark_read_result";
+        case CommandType::GetProfile: return "get_profile";
+        case CommandType::ProfileResult: return "profile_result";
+        case CommandType::UpdateProfile: return "update_profile";
+        case CommandType::UpdateProfileResult: return "update_profile_result";
+        case CommandType::GetProfiles: return "get_profiles";
+        case CommandType::ProfileItem: return "profile_item";
+        case CommandType::ProfilesResult: return "profiles_result";
         case CommandType::Info: return "info";
         case CommandType::Error: return "error";
         case CommandType::Quit: return "quit";
@@ -163,6 +170,13 @@ namespace common {
         if (value == "delete_chat_result") return CommandType::DeleteChatResult;
         if (value == "mark_read") return CommandType::MarkRead;
         if (value == "mark_read_result") return CommandType::MarkReadResult;
+        if (value == "get_profile") return CommandType::GetProfile;
+        if (value == "profile_result") return CommandType::ProfileResult;
+        if (value == "update_profile") return CommandType::UpdateProfile;
+        if (value == "update_profile_result") return CommandType::UpdateProfileResult;
+        if (value == "get_profiles") return CommandType::GetProfiles;
+        if (value == "profile_item") return CommandType::ProfileItem;
+        if (value == "profiles_result") return CommandType::ProfilesResult;
         if (value == "info") return CommandType::Info;
         if (value == "error") return CommandType::Error;
         if (value == "quit") return CommandType::Quit;

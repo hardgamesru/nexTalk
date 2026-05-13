@@ -169,6 +169,12 @@ private:
      */
     void handleDeleteChat(const std::shared_ptr<ClientSession>& session,
                           const common::ProtocolMessage& message);
+    void handleGetProfile(const std::shared_ptr<ClientSession>& session,
+                          const common::ProtocolMessage& message);
+    void handleUpdateProfile(const std::shared_ptr<ClientSession>& session,
+                             const common::ProtocolMessage& message);
+    void handleGetProfiles(const std::shared_ptr<ClientSession>& session,
+                           const common::ProtocolMessage& message);
 
     /**
      * Удаляет сессию из таблицы онлайн-пользователей и закрывает ее сокет.
@@ -186,6 +192,11 @@ private:
     void logEvent(const std::string& event);
     static bool isValidUsername(const std::string& username);
     static bool isValidPassword(const std::string& password);
+    static bool isValidDisplayName(const std::string& displayName);
+    static bool isValidBio(const std::string& bio);
+    static bool isValidAvatarColor(const std::string& avatarColor);
+    static std::string trim(const std::string& value);
+    static std::string defaultAvatarColorForUsername(const std::string& username);
     static std::string generatePasswordSalt();
     static std::string passwordHash(const std::string& password, const std::string& salt);
     static std::string currentTimestamp();

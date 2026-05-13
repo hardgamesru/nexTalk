@@ -1,6 +1,8 @@
 #include "MessageStore.hpp"
 
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <sqlite3.h>
 #include <utility>
 
@@ -95,6 +97,20 @@ namespace {
         groupId = result;
         return true;
     }
+
+    std::string defaultAvatarColorForUsername(const std::string& username) {
+        static constexpr std::array<const char*, 10> kPalette = {
+            "#5C7CFA", "#E56B6F", "#3FA37A", "#F4A261", "#7B6CF6",
+            "#4D908E", "#577590", "#BC6C25", "#C8553D", "#8A5CF6"
+        };
+
+        unsigned long long hash = 1469598103934665603ULL;
+        for (unsigned char ch : username) {
+            hash ^= ch;
+            hash *= 1099511628211ULL;
+        }
+        return kPalette[hash % kPalette.size()];
+    }
 }
 
 MessageStore::~MessageStore() {
@@ -176,7 +192,14 @@ bool MessageStore::registerUser(const std::string& username,
         }
 
         Statement update(db_,
-                         "UPDATE users SET password_salt = ?, password_hash = ? WHERE username = ?;",
+                         "UPDATE users "
+                         "SET password_salt = ?, "
+                         "    password_hash = ?, "
+                         "    display_name = COALESCE(NULLIF(display_name, ''), username), "
+                         "    bio = COALESCE(bio, ''), "
+                         "    avatar_color = COALESCE(NULLIF(avatar_color, ''), ?), "
+                         "    last_seen = COALESCE(last_seen, CURRENT_TIMESTAMP) "
+                         "WHERE username = ?;",
                          error);
         if (!update) {
             return false;
@@ -184,7 +207,9 @@ bool MessageStore::registerUser(const std::string& username,
 
         sqlite3_bind_text(update.get(), 1, passwordSalt.c_str(), -1, SQLITE_TRANSIENT);
         sqlite3_bind_text(update.get(), 2, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
-        sqlite3_bind_text(update.get(), 3, username.c_str(), -1, SQLITE_TRANSIENT);
+        const std::string defaultColor = defaultAvatarColorForUsername(username);
+        sqlite3_bind_text(update.get(), 3, defaultColor.c_str(), -1, SQLITE_TRANSIENT);
+        sqlite3_bind_text(update.get(), 4, username.c_str(), -1, SQLITE_TRANSIENT);
 
         const int updateResult = sqlite3_step(update.get());
         if (updateResult != SQLITE_DONE) {
@@ -196,16 +221,20 @@ bool MessageStore::registerUser(const std::string& username,
     }
 
     Statement statement(db_,
-                        "INSERT INTO users(username, password_salt, password_hash) "
-                        "VALUES (?, ?, ?);",
+                        "INSERT INTO users("
+                        "  username, password_salt, password_hash, display_name, bio, avatar_color, created_at, last_seen"
+                        ") VALUES (?, ?, ?, ?, '', ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP);",
                         error);
     if (!statement) {
         return false;
     }
 
+    const std::string defaultColor = defaultAvatarColorForUsername(username);
     sqlite3_bind_text(statement.get(), 1, username.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(statement.get(), 2, passwordSalt.c_str(), -1, SQLITE_TRANSIENT);
     sqlite3_bind_text(statement.get(), 3, passwordHash.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 4, username.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 5, defaultColor.c_str(), -1, SQLITE_TRANSIENT);
 
     const int result = sqlite3_step(statement.get());
     if (result != SQLITE_DONE) {
@@ -281,6 +310,176 @@ bool MessageStore::loadPasswordSalt(const std::string& username,
 bool MessageStore::userExists(const std::string& username, bool& exists, std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
     return userExistsLocked(username, exists, error);
+}
+
+bool MessageStore::getUserProfile(const std::string& username,
+                                  UserProfile& profile,
+                                  std::string& error) {
+    profile = UserProfile{};
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    Statement statement(db_,
+                        "SELECT username, "
+                        "       COALESCE(NULLIF(display_name, ''), username), "
+                        "       COALESCE(bio, ''), "
+                        "       COALESCE(NULLIF(avatar_color, ''), ''), "
+                        "       COALESCE(created_at, ''), "
+                        "       COALESCE(last_seen, '') "
+                        "FROM users WHERE username = ?;",
+                        error);
+    if (!statement) {
+        return false;
+    }
+
+    sqlite3_bind_text(statement.get(), 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) {
+        error = "unknown user";
+        return false;
+    }
+    if (result != SQLITE_ROW) {
+        error = lastError(db_);
+        return false;
+    }
+
+    const auto* rawUsername = sqlite3_column_text(statement.get(), 0);
+    const auto* rawDisplayName = sqlite3_column_text(statement.get(), 1);
+    const auto* rawBio = sqlite3_column_text(statement.get(), 2);
+    const auto* rawAvatarColor = sqlite3_column_text(statement.get(), 3);
+    const auto* rawCreatedAt = sqlite3_column_text(statement.get(), 4);
+    const auto* rawLastSeen = sqlite3_column_text(statement.get(), 5);
+
+    profile.username = rawUsername ? reinterpret_cast<const char*>(rawUsername) : "";
+    profile.displayName = rawDisplayName ? reinterpret_cast<const char*>(rawDisplayName) : profile.username;
+    profile.bio = rawBio ? reinterpret_cast<const char*>(rawBio) : "";
+    profile.avatarColor = rawAvatarColor ? reinterpret_cast<const char*>(rawAvatarColor) : "";
+    if (profile.avatarColor.empty()) {
+        profile.avatarColor = defaultAvatarColorForUsername(profile.username);
+    }
+    profile.createdAt = rawCreatedAt ? reinterpret_cast<const char*>(rawCreatedAt) : "";
+    profile.lastSeen = rawLastSeen ? reinterpret_cast<const char*>(rawLastSeen) : "";
+    return true;
+}
+
+bool MessageStore::getUserProfiles(const std::vector<std::string>& usernames,
+                                   std::vector<UserProfile>& profiles,
+                                   std::string& error) {
+    profiles.clear();
+    if (usernames.empty()) {
+        return true;
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::string sql =
+        "SELECT username, "
+        "       COALESCE(NULLIF(display_name, ''), username), "
+        "       COALESCE(bio, ''), "
+        "       COALESCE(NULLIF(avatar_color, ''), ''), "
+        "       COALESCE(created_at, ''), "
+        "       COALESCE(last_seen, '') "
+        "FROM users WHERE username IN (";
+
+    for (std::size_t i = 0; i < usernames.size(); ++i) {
+        if (i != 0) {
+            sql += ", ";
+        }
+        sql += '?';
+    }
+    sql += ") ORDER BY username ASC;";
+
+    Statement statement(db_, sql.c_str(), error);
+    if (!statement) {
+        return false;
+    }
+
+    for (std::size_t i = 0; i < usernames.size(); ++i) {
+        sqlite3_bind_text(statement.get(), static_cast<int>(i + 1), usernames[i].c_str(), -1, SQLITE_TRANSIENT);
+    }
+
+    while (true) {
+        const int result = sqlite3_step(statement.get());
+        if (result == SQLITE_DONE) {
+            return true;
+        }
+        if (result != SQLITE_ROW) {
+            error = lastError(db_);
+            return false;
+        }
+
+        UserProfile profile;
+        const auto* rawUsername = sqlite3_column_text(statement.get(), 0);
+        const auto* rawDisplayName = sqlite3_column_text(statement.get(), 1);
+        const auto* rawBio = sqlite3_column_text(statement.get(), 2);
+        const auto* rawAvatarColor = sqlite3_column_text(statement.get(), 3);
+        const auto* rawCreatedAt = sqlite3_column_text(statement.get(), 4);
+        const auto* rawLastSeen = sqlite3_column_text(statement.get(), 5);
+
+        profile.username = rawUsername ? reinterpret_cast<const char*>(rawUsername) : "";
+        profile.displayName = rawDisplayName ? reinterpret_cast<const char*>(rawDisplayName) : profile.username;
+        profile.bio = rawBio ? reinterpret_cast<const char*>(rawBio) : "";
+        profile.avatarColor = rawAvatarColor ? reinterpret_cast<const char*>(rawAvatarColor) : "";
+        if (profile.avatarColor.empty()) {
+            profile.avatarColor = defaultAvatarColorForUsername(profile.username);
+        }
+        profile.createdAt = rawCreatedAt ? reinterpret_cast<const char*>(rawCreatedAt) : "";
+        profile.lastSeen = rawLastSeen ? reinterpret_cast<const char*>(rawLastSeen) : "";
+        profiles.push_back(std::move(profile));
+    }
+}
+
+bool MessageStore::updateUserProfile(const std::string& username,
+                                     const std::string& displayName,
+                                     const std::string& bio,
+                                     const std::string& avatarColor,
+                                     std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    Statement statement(db_,
+                        "UPDATE users "
+                        "SET display_name = ?, bio = ?, avatar_color = ?, last_seen = CURRENT_TIMESTAMP "
+                        "WHERE username = ?;",
+                        error);
+    if (!statement) {
+        return false;
+    }
+
+    sqlite3_bind_text(statement.get(), 1, displayName.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 2, bio.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 3, avatarColor.c_str(), -1, SQLITE_TRANSIENT);
+    sqlite3_bind_text(statement.get(), 4, username.c_str(), -1, SQLITE_TRANSIENT);
+
+    const int result = sqlite3_step(statement.get());
+    if (result != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+
+    if (sqlite3_changes(db_) == 0) {
+        error = "unknown user";
+        return false;
+    }
+
+    return true;
+}
+
+bool MessageStore::updateUserLastSeen(const std::string& username, std::string& error) {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    Statement statement(db_,
+                        "UPDATE users SET last_seen = CURRENT_TIMESTAMP WHERE username = ?;",
+                        error);
+    if (!statement) {
+        return false;
+    }
+
+    sqlite3_bind_text(statement.get(), 1, username.c_str(), -1, SQLITE_TRANSIENT);
+    const int result = sqlite3_step(statement.get());
+    if (result != SQLITE_DONE) {
+        error = lastError(db_);
+        return false;
+    }
+
+    return true;
 }
 
 bool MessageStore::saveMessage(const std::string& sender,
@@ -2306,7 +2505,11 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
         "  username TEXT NOT NULL UNIQUE,"
         "  password_salt TEXT,"
         "  password_hash TEXT,"
-        "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP"
+        "  display_name TEXT,"
+        "  bio TEXT DEFAULT '',"
+        "  avatar_color TEXT DEFAULT '',"
+        "  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,"
+        "  last_seen TEXT"
         ");"
         "CREATE TABLE IF NOT EXISTS conversations ("
         "  id INTEGER PRIMARY KEY AUTOINCREMENT,"
@@ -2389,6 +2592,11 @@ bool MessageStore::ensureSchemaLocked(std::string& error) {
 
     return ensureColumnLocked("users", "password_salt", "TEXT", error) &&
            ensureColumnLocked("users", "password_hash", "TEXT", error) &&
+           ensureColumnLocked("users", "display_name", "TEXT", error) &&
+           ensureColumnLocked("users", "bio", "TEXT DEFAULT ''", error) &&
+           ensureColumnLocked("users", "avatar_color", "TEXT DEFAULT ''", error) &&
+           ensureColumnLocked("users", "created_at", "TEXT", error) &&
+           ensureColumnLocked("users", "last_seen", "TEXT", error) &&
            ensureColumnLocked("messages", "reply_to_message_id", "INTEGER", error) &&
            ensureColumnLocked("messages", "forward_from_message_id", "INTEGER", error) &&
            ensureColumnLocked("messages", "forward_from_sender", "TEXT", error) &&

@@ -1,7 +1,10 @@
 #include "MessengerServer.hpp"
 
+#include <algorithm>
 #include <arpa/inet.h>
+#include <array>
 #include <cerrno>
+#include <cctype>
 #include <chrono>
 #include <cstring>
 #include <ctime>
@@ -177,6 +180,18 @@ namespace {
             storedMessage.forwardFromText,
             storedMessage.deletedAt,
             storedMessage.deletedBy
+        };
+    }
+
+    std::vector<std::string> buildUserProfileFields(const UserProfile& profile, bool online) {
+        return {
+            profile.username,
+            profile.displayName,
+            profile.bio,
+            profile.avatarColor,
+            profile.createdAt,
+            profile.lastSeen,
+            online ? "1" : "0"
         };
     }
 }
@@ -571,6 +586,15 @@ void MessengerServer::handleClient(std::shared_ptr<ClientSession> session) {
         case common::CommandType::DeleteChat:
             handleDeleteChat(session, message);
             break;
+        case common::CommandType::GetProfile:
+            handleGetProfile(session, message);
+            break;
+        case common::CommandType::UpdateProfile:
+            handleUpdateProfile(session, message);
+            break;
+        case common::CommandType::GetProfiles:
+            handleGetProfiles(session, message);
+            break;
         case common::CommandType::Quit:
             sendToSession(session, {common::CommandType::Info, {"bye"}});
             session->active = false;
@@ -641,6 +665,10 @@ void MessengerServer::handleLogin(const std::shared_ptr<ClientSession>& session,
     }
 
     logEvent("user_login username=" + username + " peer=" + session->peer);
+    if (!messageStore_.updateUserLastSeen(username, storageError)) {
+        logEvent("user_last_seen_update_failed username=" + username +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+    }
     sendToSession(session, {common::CommandType::LoginResult, {"ok", "logged in as " + username}});
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
 }
@@ -1587,9 +1615,147 @@ void MessengerServer::handleDeleteChat(const std::shared_ptr<ClientSession>& ses
     handleFetchChats(session, {common::CommandType::FetchChats, {}});
 }
 
+void MessengerServer::handleGetProfile(const std::shared_ptr<ClientSession>& session,
+                                       const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    if (message.fields.size() != 1 || !isValidUsername(message.fields[0])) {
+        sendToSession(session, {common::CommandType::ProfileResult, {"error", "invalid username"}});
+        return;
+    }
+
+    UserProfile profile;
+    std::string storageError;
+    if (!messageStore_.getUserProfile(message.fields[0], profile, storageError)) {
+        sendToSession(session,
+                      {common::CommandType::ProfileResult,
+                       {"error", storageError.empty() ? "unknown user" : storageError}});
+        return;
+    }
+
+    bool online = false;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        online = onlineUsers_.find(profile.username) != onlineUsers_.end();
+    }
+
+    std::vector<std::string> fields = {"ok"};
+    const auto profileFields = buildUserProfileFields(profile, online);
+    fields.insert(fields.end(), profileFields.begin(), profileFields.end());
+    sendToSession(session, {common::CommandType::ProfileResult, fields});
+}
+
+void MessengerServer::handleUpdateProfile(const std::shared_ptr<ClientSession>& session,
+                                          const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    if (message.fields.size() != 3) {
+        sendToSession(session,
+                      {common::CommandType::UpdateProfileResult,
+                       {"error", "usage: update_profile <display_name> <bio> <avatar_color>"}});
+        return;
+    }
+
+    const std::string displayName = trim(message.fields[0]);
+    const std::string bio = trim(message.fields[1]);
+    std::string avatarColor = message.fields[2];
+
+    if (!isValidDisplayName(displayName)) {
+        sendToSession(session, {common::CommandType::UpdateProfileResult, {"error", "invalid display name"}});
+        return;
+    }
+    if (!isValidBio(bio)) {
+        sendToSession(session, {common::CommandType::UpdateProfileResult, {"error", "invalid bio"}});
+        return;
+    }
+    if (avatarColor.empty()) {
+        avatarColor = defaultAvatarColorForUsername(session->username);
+    }
+    if (!isValidAvatarColor(avatarColor)) {
+        sendToSession(session, {common::CommandType::UpdateProfileResult, {"error", "invalid avatar color"}});
+        return;
+    }
+
+    std::string storageError;
+    if (!messageStore_.updateUserProfile(session->username, displayName, bio, avatarColor, storageError)) {
+        sendToSession(session,
+                      {common::CommandType::UpdateProfileResult,
+                       {"error", storageError.empty() ? "storage error" : storageError}});
+        return;
+    }
+    if (!messageStore_.updateUserLastSeen(session->username, storageError)) {
+        logEvent("user_last_seen_update_failed username=" + session->username +
+                 " error=\"" + escapeLogField(storageError) + "\"");
+    }
+
+    UserProfile profile;
+    if (!messageStore_.getUserProfile(session->username, profile, storageError)) {
+        sendToSession(session, {common::CommandType::UpdateProfileResult, {"error", "storage error"}});
+        return;
+    }
+
+    bool online = false;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        online = onlineUsers_.find(profile.username) != onlineUsers_.end();
+    }
+
+    std::vector<std::string> fields = {"ok"};
+    const auto profileFields = buildUserProfileFields(profile, online);
+    fields.insert(fields.end(), profileFields.begin(), profileFields.end());
+    sendToSession(session, {common::CommandType::UpdateProfileResult, fields});
+}
+
+void MessengerServer::handleGetProfiles(const std::shared_ptr<ClientSession>& session,
+                                        const common::ProtocolMessage& message) {
+    if (session->username.empty()) {
+        sendToSession(session, {common::CommandType::Error, {"login first"}});
+        return;
+    }
+    if (message.fields.size() != 1) {
+        sendToSession(session, {common::CommandType::ProfilesResult, {"error", "invalid request"}});
+        return;
+    }
+
+    std::set<std::string> uniqueUsernames;
+    for (const auto& username : splitCsv(message.fields[0])) {
+        if (!isValidUsername(username)) {
+            sendToSession(session, {common::CommandType::ProfilesResult, {"error", "invalid username"}});
+            return;
+        }
+        uniqueUsernames.insert(username);
+    }
+
+    std::vector<std::string> usernames(uniqueUsernames.begin(), uniqueUsernames.end());
+    std::vector<UserProfile> profiles;
+    std::string storageError;
+    if (!messageStore_.getUserProfiles(usernames, profiles, storageError)) {
+        sendToSession(session,
+                      {common::CommandType::ProfilesResult,
+                       {"error", storageError.empty() ? "storage error" : storageError}});
+        return;
+    }
+
+    for (const auto& profile : profiles) {
+        bool online = false;
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex_);
+            online = onlineUsers_.find(profile.username) != onlineUsers_.end();
+        }
+        sendToSession(session, {common::CommandType::ProfileItem, buildUserProfileFields(profile, online)});
+    }
+
+    sendToSession(session, {common::CommandType::ProfilesResult, {"ok"}});
+}
+
 void MessengerServer::removeSession(const std::shared_ptr<ClientSession>& session) {
     session->active = false;
 
+    const std::string username = session->username;
     if (!session->username.empty()) {
         // Удаляем пользователя из onlineUsers_ только если map все еще указывает
         // именно на эту сессию. Это защищает от редких случаев повторного логина.
@@ -1597,6 +1763,14 @@ void MessengerServer::removeSession(const std::shared_ptr<ClientSession>& sessio
         const auto it = onlineUsers_.find(session->username);
         if (it != onlineUsers_.end() && it->second == session) {
             onlineUsers_.erase(it);
+        }
+    }
+
+    if (!username.empty()) {
+        std::string storageError;
+        if (!messageStore_.updateUserLastSeen(username, storageError)) {
+            logEvent("user_last_seen_update_failed username=" + username +
+                     " error=\"" + escapeLogField(storageError) + "\"");
         }
     }
 
@@ -1655,6 +1829,60 @@ bool MessengerServer::isValidUsername(const std::string& username) {
 
 bool MessengerServer::isValidPassword(const std::string& password) {
     return password.size() >= 4 && password.size() <= 128;
+}
+
+bool MessengerServer::isValidDisplayName(const std::string& displayName) {
+    const std::string trimmedValue = trim(displayName);
+    return !trimmedValue.empty() && trimmedValue.size() <= 40;
+}
+
+bool MessengerServer::isValidBio(const std::string& bio) {
+    return bio.size() <= 160;
+}
+
+bool MessengerServer::isValidAvatarColor(const std::string& avatarColor) {
+    if (avatarColor.size() != 7 || avatarColor[0] != '#') {
+        return false;
+    }
+
+    for (std::size_t i = 1; i < avatarColor.size(); ++i) {
+        const char ch = avatarColor[i];
+        const bool isDigit = ch >= '0' && ch <= '9';
+        const bool isLowerHex = ch >= 'a' && ch <= 'f';
+        const bool isUpperHex = ch >= 'A' && ch <= 'F';
+        if (!isDigit && !isLowerHex && !isUpperHex) {
+            return false;
+        }
+    }
+
+    return true;
+}
+
+std::string MessengerServer::trim(const std::string& value) {
+    const auto begin = std::find_if_not(value.begin(), value.end(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    });
+    const auto end = std::find_if_not(value.rbegin(), value.rend(), [](unsigned char ch) {
+        return std::isspace(ch) != 0;
+    }).base();
+    if (begin >= end) {
+        return "";
+    }
+    return std::string(begin, end);
+}
+
+std::string MessengerServer::defaultAvatarColorForUsername(const std::string& username) {
+    static constexpr std::array<const char*, 10> kPalette = {
+        "#5C7CFA", "#E56B6F", "#3FA37A", "#F4A261", "#7B6CF6",
+        "#4D908E", "#577590", "#BC6C25", "#C8553D", "#8A5CF6"
+    };
+
+    unsigned long long hash = 1469598103934665603ULL;
+    for (unsigned char ch : username) {
+        hash ^= ch;
+        hash *= 1099511628211ULL;
+    }
+    return kPalette[hash % kPalette.size()];
 }
 
 std::string MessengerServer::generatePasswordSalt() {
