@@ -705,6 +705,8 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
                                             text,
                                             replyToMessageId,
                                             0,
+                                            "",
+                                            "",
                                             storedMessage,
                                             groupName,
                                             memberUsernames,
@@ -766,6 +768,8 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
                                    text,
                                    replyToMessageId,
                                    0,
+                                   "",
+                                   "",
                                    storedMessage,
                                    storageError)) {
         logEvent("message_store_failed from=" + session->username +
@@ -890,25 +894,19 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
         return;
     }
 
+    const std::string targetChatId = message.fields[0];
+    const std::string sourceChatId = message.fields[1];
+    const std::string commentText = message.fields.size() == 4 ? message.fields[3] : "";
+
     StoredMessage sourceMessage;
     std::string storageError;
-    if (!messageStore_.loadAccessibleMessage(session->username, sourceMessageId, sourceMessage, storageError)) {
+    if (!messageStore_.loadAccessibleMessageInChat(session->username, sourceChatId, sourceMessageId, sourceMessage, storageError)) {
         sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError.empty() ? "cannot load source message" : storageError}});
         return;
     }
 
     if (sourceMessage.id == 0) {
         sendToSession(session, {common::CommandType::SendMessageResult, {"error", "forward target not found"}});
-        return;
-    }
-
-    const std::string targetChatId = message.fields[0];
-    const std::string sourceChatId = message.fields[1];
-    const std::string commentText = message.fields.size() == 4 ? message.fields[3] : "";
-
-    long long sourceGroupId = 0;
-    if (parseGroupChatIdValue(sourceChatId, sourceGroupId) && sourceMessage.recipient.empty()) {
-        sendToSession(session, {common::CommandType::SendMessageResult, {"error", "invalid source chat"}});
         return;
     }
 
@@ -927,6 +925,8 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
                                             commentText,
                                             0,
                                             sourceMessage.id,
+                                            sourceMessage.sender,
+                                            sourceMessage.text,
                                             storedMessage,
                                             groupName,
                                             memberUsernames,
@@ -980,6 +980,8 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
                                    commentText,
                                    0,
                                    sourceMessage.id,
+                                   sourceMessage.sender,
+                                   sourceMessage.text,
                                    storedMessage,
                                    storageError)) {
         sendToSession(session, {common::CommandType::SendMessageResult, {"error", storageError}});

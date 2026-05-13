@@ -87,12 +87,19 @@ public:
                      const std::string& text,
                      long long replyToMessageId,
                      long long forwardFromMessageId,
+                     const std::string& forwardFromSenderOverride,
+                     const std::string& forwardFromTextOverride,
                      StoredMessage& storedMessage,
                      std::string& error);
     bool loadAccessibleMessage(const std::string& username,
                                long long messageId,
                                StoredMessage& message,
                                std::string& error);
+    bool loadAccessibleMessageInChat(const std::string& username,
+                                     const std::string& chatId,
+                                     long long messageId,
+                                     StoredMessage& message,
+                                     std::string& error);
     bool fetchHistory(const std::string& user,
                       const std::string& peer,
                       int limit,
@@ -157,6 +164,8 @@ public:
                           const std::string& text,
                           long long replyToMessageId,
                           long long forwardFromMessageId,
+                          const std::string& forwardFromSenderOverride,
+                          const std::string& forwardFromTextOverride,
                           StoredMessage& storedMessage,
                           std::string& groupName,
                           std::vector<std::string>& memberUsernames,

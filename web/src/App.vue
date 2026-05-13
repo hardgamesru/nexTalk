@@ -243,6 +243,19 @@ function displayedMessageText(message: ChatMessage) {
   return isMessageDeleted(message) ? DELETED_MESSAGE_TEXT : message.text;
 }
 
+function chatPreviewText(message: ChatMessage) {
+  if (isMessageDeleted(message)) {
+    return DELETED_MESSAGE_TEXT;
+  }
+  if (message.text) {
+    return message.text;
+  }
+  if (message.forwardFromText) {
+    return message.forwardFromText;
+  }
+  return "";
+}
+
 function canDeleteMessage(message: ChatMessage) {
   return message.sender === session.currentUser && !isMessageDeleted(message);
 }
@@ -658,7 +671,7 @@ function updateChatPreviewFromMessage(peer: string, message: ChatMessage, unread
 
   existingChat.lastAt = message.createdAt;
   existingChat.lastSender = message.sender;
-  existingChat.lastText = displayedMessageText(message);
+  existingChat.lastText = chatPreviewText(message);
   if (typeof unreadCount === "number") {
     existingChat.unreadCount = unreadCount;
   }
@@ -866,27 +879,28 @@ function cancelForward() {
   ui.forwardDraft = "";
 }
 
-function selectForwardPeer(peer: string) {
-  ui.forwardRecipient = peer;
+function selectForwardPeer(peerId: string) {
+  ui.forwardRecipient = peerId;
 }
 
 function submitForward() {
-  const peer = ui.forwardRecipient.trim();
+  const peerId = ui.forwardRecipient.trim();
   if (!ui.forwardTarget?.id) {
     return;
   }
 
-  if (!peer) {
+  if (!peerId) {
     return;
   }
 
-  const fields = [peer, ui.forwardTarget.chatId, String(ui.forwardTarget.id)];
+  const fields = [peerId, ui.forwardTarget.chatId, String(ui.forwardTarget.id)];
   if (ui.forwardDraft.trim()) {
     fields.push(ui.forwardDraft.trim());
   }
 
   sendCommand("forward_message", fields);
-  pushLog(`Forwarding message #${ui.forwardTarget.id} to ${peer}`);
+  const targetChat = chats.value.find((chat) => chat.peerId === peerId);
+  pushLog(`Forwarding message #${ui.forwardTarget.id} to ${targetChat?.peer ?? peerId}`);
   cancelForward();
 }
 
@@ -1705,10 +1719,10 @@ watch(
         <div class="forward-chat-list">
           <button
             v-for="chat in forwardableChats"
-            :key="`forward-${chat.peer}`"
+            :key="`forward-${chat.peerId}`"
             class="forward-chat-row"
-            :class="{ active: ui.forwardRecipient === chat.peer }"
-            @click="selectForwardPeer(chat.peer)"
+            :class="{ active: ui.forwardRecipient === chat.peerId }"
+            @click="selectForwardPeer(chat.peerId)"
           >
             <strong>{{ chat.peer }}</strong>
             <span>{{ chat.lastText ? `${chat.lastSender}: ${chat.lastText}` : "No messages yet" }}</span>
