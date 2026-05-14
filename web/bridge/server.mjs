@@ -2,6 +2,7 @@ import tls from "node:tls";
 import { WebSocketServer } from "ws";
 
 const BRIDGE_PORT = Number.parseInt(process.env.BRIDGE_PORT ?? "5174", 10);
+const BRIDGE_HOST = process.env.BRIDGE_HOST ?? "127.0.0.1";
 const DEFAULT_HOST = process.env.NEXTALK_HOST ?? "127.0.0.1";
 const DEFAULT_TCP_PORT = Number.parseInt(process.env.NEXTALK_PORT ?? "5555", 10);
 // Ограничение строки должно совпадать по смыслу с C++ kMaxLineLength.
@@ -19,12 +20,45 @@ const ALLOWED_ORIGINS = new Set(
     .map((value) => value.trim())
     .filter(Boolean),
 );
+const ALLOW_PRIVATE_ORIGINS = process.env.BRIDGE_ALLOW_PRIVATE_ORIGINS === "1";
 
-const wss = new WebSocketServer({ host: "127.0.0.1", port: BRIDGE_PORT });
+const wss = new WebSocketServer({ host: BRIDGE_HOST, port: BRIDGE_PORT });
+
+function isPrivateIpv4(hostname) {
+  const parts = hostname.split(".");
+  if (parts.length !== 4) {
+    return false;
+  }
+
+  const octets = parts.map((part) => Number.parseInt(part, 10));
+  if (octets.some((octet) => !Number.isInteger(octet) || octet < 0 || octet > 255)) {
+    return false;
+  }
+
+  return octets[0] === 10 ||
+    (octets[0] === 172 && octets[1] >= 16 && octets[1] <= 31) ||
+    (octets[0] === 192 && octets[1] === 168);
+}
+
+function isLocalDevHostname(hostname) {
+  return hostname === "localhost" ||
+    hostname === "127.0.0.1" ||
+    hostname === "::1" ||
+    hostname === "[::1]";
+}
+
+function isAllowedPrivateOrigin(protocol, hostname) {
+  if (!ALLOW_PRIVATE_ORIGINS) {
+    return false;
+  }
+
+  return (protocol === "http:" || protocol === "https:") &&
+    (isPrivateIpv4(hostname) || hostname.endsWith(".local"));
+}
 
 function isAllowedOrigin(origin) {
   // В dev-режиме браузер обычно приходит с origin вида http://localhost:5173.
-  // Для production-домена лучше задать BRIDGE_ALLOWED_ORIGINS явно.
+  // Для сетевого dev-режима можно включить BRIDGE_ALLOW_PRIVATE_ORIGINS=1.
   if (!origin) {
     return true;
   }
@@ -35,7 +69,7 @@ function isAllowedOrigin(origin) {
   try {
     const { hostname, protocol } = new URL(origin);
     return (protocol === "http:" || protocol === "https:") &&
-      (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1");
+      (isLocalDevHostname(hostname) || isAllowedPrivateOrigin(protocol, hostname));
   } catch {
     return false;
   }
@@ -192,4 +226,11 @@ wss.on("connection", (ws, request) => {
   });
 });
 
-console.log(`NexTalk bridge listening on ws://127.0.0.1:${BRIDGE_PORT}`);
+wss.on("error", (error) => {
+  console.error(`NexTalk bridge failed to listen on ws://${BRIDGE_HOST}:${BRIDGE_PORT}: ${error.message}`);
+  process.exitCode = 1;
+});
+
+wss.on("listening", () => {
+  console.log(`NexTalk bridge listening on ws://${BRIDGE_HOST}:${BRIDGE_PORT}`);
+});
