@@ -10,6 +10,12 @@
 
 namespace client {
 
+/**
+ * Сообщение, которое клиент показывает в истории.
+ *
+ * Поля повторяют серверный StoredMessage, но без деталей SQLite. Такой DTO
+ * удобно передавать из сетевого слоя в консольный или GUI-интерфейс.
+ */
 struct HistoryItem {
     long long id{0};
     std::string createdAt;
@@ -24,7 +30,11 @@ struct HistoryItem {
     std::string forwardFromText;
 };
 
+/**
+ * Одна строка списка чатов на клиенте.
+ */
 struct ChatSummary {
+    // peerId используется в командах протокола; peer можно показывать человеку.
     std::string peerId;
     std::string peer;
     std::string lastAt;
@@ -32,6 +42,9 @@ struct ChatSummary {
     std::string lastText;
 };
 
+/**
+ * Пользователь, найденный командой search_users.
+ */
 struct UserSearchItem {
     std::string id;
     std::string username;
@@ -47,6 +60,8 @@ struct UserSearchItem {
 class ClientConnection {
 public:
     struct Callbacks {
+        // Все callbacks вызываются из receiverThread_. UI-слой должен сам
+        // перекинуть событие в главный поток, если его toolkit этого требует.
         std::function<void(const std::string&)> onInfo;
         std::function<void(const std::string&)> onError;
         std::function<void(const std::string& status, const std::string& text)> onRegisterResult;
@@ -79,10 +94,14 @@ public:
 
     void setCallbacks(Callbacks callbacks);
 
+    // Открывает TCP/TLS-соединение и запускает receiverLoop в отдельном потоке.
     bool connectToServer(const std::string& host, int port, std::string& error);
+    // Останавливает receiverLoop, закрывает socket и join-ит поток.
     void stop();
 
     bool isRunning() const;
+    // Ниже идут тонкие wrappers над протокольными командами. Они возвращают
+    // false только если команда не ушла в сеть; результат операции придет callback-ом.
     bool registerAccount(const std::string& username, const std::string& password);
     bool login(const std::string& username, const std::string& password);
     bool sendPrivateMessage(const std::string& recipient,
@@ -98,11 +117,18 @@ public:
     bool quit();
 
 private:
+    // Сериализует ProtocolMessage и отправляет его целиком.
     bool sendMessage(const common::ProtocolMessage& message);
+    // send() может записать только часть буфера, поэтому sendAll крутится,
+    // пока не отправит всю строку протокола.
     bool sendAll(const std::string& data);
+    // Читает до '\n', потому что общий Protocol работает построчно.
     bool readLine(std::string& line);
     void receiverLoop();
+    // Разбирает входящую команду сервера и вызывает подходящий callback.
     void handleServerMessage(const common::ProtocolMessage& message);
+    // Берем снимок callbacks под mutex, а вызываем уже без lock, чтобы callback
+    // мог безопасно вызвать методы ClientConnection.
     Callbacks callbacksSnapshot();
 
     int socket_{-1};

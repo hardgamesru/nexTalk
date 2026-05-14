@@ -31,6 +31,8 @@ function getDbName(username: string) {
 }
 
 function makeCacheKey(username: string, peer: string, message: ChatMessage) {
+  // Кэш разделен по владельцу аккаунта и чату, чтобы разные пользователи
+  // одного браузера не видели локальные сообщения друг друга.
   return `${username}:${peer}:${message.id}`;
 }
 
@@ -82,6 +84,8 @@ export function openMessageCacheDb(username: string): Promise<IDBDatabase> {
         ? request.transaction!.objectStore(STORE_NAME)
         : db.createObjectStore(STORE_NAME, { keyPath: "cacheKey" });
 
+      // Индекс [peer, id] позволяет быстро получить историю конкретного чата
+      // в стабильном порядке, не перебирая весь IndexedDB store.
       if (!store.indexNames.contains("peerAndId")) {
         store.createIndex("peerAndId", ["peer", "id"], { unique: false });
       }
@@ -143,6 +147,8 @@ export async function trimCachedMessages(username: string, peer: string, limit: 
       }
 
       kept += 1;
+      // Идем курсором с конца истории: сначала оставляем самые новые записи,
+      // затем удаляем старые, когда локальный лимит чата превышен.
       if (kept > limit) {
         cursor.delete();
       }

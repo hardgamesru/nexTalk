@@ -141,6 +141,9 @@ class GigaChatProvider(AIProvider):
             raw_body = self._open_json_request(request)
         except urllib.error.HTTPError as error:
             body = error.read().decode("utf-8", errors="replace")
+            # Токен может протухнуть раньше expires_at на стороне провайдера.
+            # Один раз очищаем кэш и повторяем запрос, чтобы пользователь не
+            # видел ошибку авторизации из-за устаревшего access_token.
             if error.code == 401 and retry_on_auth_error:
                 self._clear_cached_token()
                 return self._chat_with_retry(messages, retry_on_auth_error=False)
@@ -172,6 +175,8 @@ class GigaChatProvider(AIProvider):
     def _access_token(self) -> str:
         now = time.time()
         with _gigachat_token_cache.lock:
+            # Держим один токен на процесс ai_service: так все пользователи web
+            # не получают OAuth-токен заново на каждое сообщение.
             if _gigachat_token_cache.access_token and _gigachat_token_cache.expires_at - 60 > now:
                 return _gigachat_token_cache.access_token
 
@@ -318,6 +323,8 @@ def _normalize_expires_at(raw_value: object) -> float:
         expires_at = float(raw_value)
     except (TypeError, ValueError):
         return time.time() + 25 * 60
+    # GigaChat может вернуть expires_at в миллисекундах Unix time.
+    # Внутри сервиса храним секунды, как ожидает time.time().
     if expires_at > 10_000_000_000:
         expires_at /= 1000
     return expires_at
@@ -326,6 +333,8 @@ def _normalize_expires_at(raw_value: object) -> float:
 def _build_ssl_context() -> ssl.SSLContext | None:
     verify = os.getenv("GIGACHAT_VERIFY_SSL", "1").strip().lower()
     if verify in {"0", "false", "no"}:
+        # Это аварийный локальный режим для стендов с самоподписанной цепочкой.
+        # В обычной эксплуатации лучше указать GIGACHAT_CA_FILE или оставить verify=1.
         return ssl._create_unverified_context()
 
     ca_file = os.getenv("GIGACHAT_CA_FILE", "").strip()

@@ -143,18 +143,40 @@ private:
      */
     void handleCreateChat(const std::shared_ptr<ClientSession>& session,
                           const common::ProtocolMessage& message);
+    /**
+     * Создает групповой чат, добавляет участников и отправляет системное
+     * сообщение о создании группы.
+     */
     void handleCreateGroup(const std::shared_ptr<ClientSession>& session,
                            const common::ProtocolMessage& message);
+    /**
+     * Отправляет метаданные группы и список участников для окна настроек.
+     */
     void handleGetGroupInfo(const std::shared_ptr<ClientSession>& session,
                             const common::ProtocolMessage& message);
+    /**
+     * Добавляет новых участников. Доступно только администратору группы.
+     */
     void handleAddGroupMembers(const std::shared_ptr<ClientSession>& session,
                                const common::ProtocolMessage& message);
+    /**
+     * Удаляет участника из группы. Сервер также рассылает обновление участникам.
+     */
     void handleRemoveGroupMember(const std::shared_ptr<ClientSession>& session,
                                  const common::ProtocolMessage& message);
+    /**
+     * Передает роль администратора другому участнику группы.
+     */
     void handleTransferGroupAdmin(const std::shared_ptr<ClientSession>& session,
                                   const common::ProtocolMessage& message);
+    /**
+     * Текущий пользователь покидает группу.
+     */
     void handleLeaveGroup(const std::shared_ptr<ClientSession>& session,
                           const common::ProtocolMessage& message);
+    /**
+     * Полностью удаляет группу. Это отдельная операция от delete_chat.
+     */
     void handleDeleteGroup(const std::shared_ptr<ClientSession>& session,
                            const common::ProtocolMessage& message);
 
@@ -169,10 +191,20 @@ private:
      */
     void handleDeleteChat(const std::shared_ptr<ClientSession>& session,
                           const common::ProtocolMessage& message);
+    /**
+     * Возвращает профиль одного пользователя.
+     */
     void handleGetProfile(const std::shared_ptr<ClientSession>& session,
                           const common::ProtocolMessage& message);
+    /**
+     * Обновляет профиль текущего пользователя: отображаемое имя, bio и цвет.
+     */
     void handleUpdateProfile(const std::shared_ptr<ClientSession>& session,
                              const common::ProtocolMessage& message);
+    /**
+     * Пакетная загрузка профилей нужна UI, чтобы быстро показать аватары и имена
+     * в уже загруженной истории сообщений.
+     */
     void handleGetProfiles(const std::shared_ptr<ClientSession>& session,
                            const common::ProtocolMessage& message);
 
@@ -196,7 +228,11 @@ private:
     static bool isValidBio(const std::string& bio);
     static bool isValidAvatarColor(const std::string& avatarColor);
     static std::string trim(const std::string& value);
+    // Цвет аватара детерминированный: один и тот же username всегда получает
+    // один и тот же fallback-цвет, даже если профиль еще не загружен.
     static std::string defaultAvatarColorForUsername(const std::string& username);
+    // Пароли хранятся как hash(password + salt). legacyPasswordHash оставлен,
+    // чтобы старые тестовые аккаунты можно было мигрировать без сброса пароля.
     static std::string generatePasswordSalt();
     static std::string passwordHash(const std::string& password, const std::string& salt);
     static std::string legacyPasswordHash(const std::string& password, const std::string& salt);

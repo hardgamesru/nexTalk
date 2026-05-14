@@ -25,6 +25,8 @@ const RECORD_KEY = "history";
 const dbPromises = new Map<string, Promise<IDBDatabase>>();
 
 function getDbName(username: string) {
+  // История AI-чата хранится отдельно для каждого аккаунта браузера.
+  // Это не серверная история: ее можно чистить локально без влияния на других.
   return `${DB_PREFIX}:${username}`;
 }
 

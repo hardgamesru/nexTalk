@@ -38,6 +38,9 @@ function isAllowedOrigin(origin) {
 }
 
 function isAllowedTcpTarget(host, port) {
+  // Bridge открывает TCP/TLS-соединение от имени браузера, поэтому цель
+  // ограничена allowlist-ом. Иначе web-страница могла бы использовать bridge
+  // как локальный TCP-proxy к произвольному адресу.
   return ALLOWED_HOSTS.has(host) && Number.isInteger(port) && port > 0 && port <= 65535;
 }
 
@@ -88,6 +91,9 @@ wss.on("connection", (ws, request) => {
       readBuffer += chunk.toString("utf8");
       let boundary = readBuffer.indexOf("\n");
 
+      // C++ сервер говорит построчным TAB-протоколом поверх TCP. TCP может
+      // разбить одну строку на несколько chunk-ов или склеить несколько строк,
+      // поэтому bridge буферизует данные до '\n'.
       while (boundary >= 0) {
         const line = readBuffer.slice(0, boundary);
         if (line.length > MAX_LINE_LENGTH) {
@@ -160,6 +166,8 @@ wss.on("connection", (ws, request) => {
         sendJson(ws, { type: "bridge_error", message: "Protocol line is too large" });
         return;
       }
+      // Клиентский Vue-код хранит команду без перевода строки, а сервер читает
+      // поток построчно. Нормализуем здесь, чтобы не дублировать это в UI.
       const normalized = line.endsWith("\n") ? line : `${line}\n`;
       tcp.write(normalized);
       return;

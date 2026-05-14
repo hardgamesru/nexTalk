@@ -9,6 +9,8 @@
 namespace {
     constexpr const char* kDeletedMessageText = "Сообщение удалено";
 
+    // Небольшая RAII-обертка над sqlite3_stmt: каждый prepare обязан закончиться
+    // sqlite3_finalize, иначе в долгоживущем сервере начнут копиться ресурсы.
     class Statement {
     public:
         Statement(sqlite3* db, const char* sql, std::string& error) {
@@ -42,6 +44,8 @@ namespace {
 
     std::pair<std::string, std::string> orderedUsers(const std::string& user,
                                                      const std::string& peer) {
+        // Для личного чата ключ всегда одинаковый для обеих сторон:
+        // chat(alice, bob) и chat(bob, alice) должны указывать на одну запись.
         if (user <= peer) {
             return {user, peer};
         }
@@ -57,6 +61,8 @@ namespace {
         std::string escaped;
         escaped.reserve(value.size());
 
+        // В SQLite LIKE символы '%' и '_' являются wildcard-ами. Экранируем их,
+        // чтобы поиск по имени пользователя искал буквальный текст.
         for (char ch : value) {
             if (ch == '\\' || ch == '%' || ch == '_') {
                 escaped += '\\';

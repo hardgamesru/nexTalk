@@ -23,6 +23,8 @@ type ProtocolMessage = {
   fields: string[];
 };
 
+// ChatItem приходит из серверной команды chat_item и используется только для
+// списка диалогов слева. Полная история сообщений хранится отдельно.
 type ChatItem = {
   peerId: string;
   peer: string;
@@ -50,6 +52,9 @@ type UserProfile = {
 };
 
 type AuthMode = "choice" | "login" | "register";
+
+// Текст удаленного сообщения должен совпадать с серверной заглушкой, чтобы
+// preview в списке чатов и пузырь в переписке выглядели одинаково.
 const DELETED_MESSAGE_TEXT = "Сообщение удалено";
 const AI_CHAT_ID = "__ai__";
 const AI_CHAT_NAME = "NexTalk AI";
@@ -71,6 +76,8 @@ const AI_REWRITE_PRESETS = [
 const bridgeUrl = computed(() => `ws://${window.location.hostname}:5174`);
 const aiServiceUrl = computed(() => `http://${window.location.hostname}:5000`);
 
+// Данные подключения к C++ серверу. Web-клиент не ходит в TCP напрямую:
+// сначала он подключается к Node bridge, а bridge уже открывает TLS socket.
 const form = reactive({
   host: "127.0.0.1",
   port: 5555,
@@ -98,6 +105,8 @@ const connection = reactive({
   statusLine: "Нет подключения",
 });
 
+// ui содержит только состояние интерфейса: открытые модалки, черновики,
+// выделения и временные флаги загрузки. Серверная модель здесь не хранится.
 const ui = reactive({
   messageDraft: "",
   chatFilter: "",
@@ -163,7 +172,11 @@ const ui = reactive({
 });
 
 const chats = ref<ChatItem[]>([]);
+// chatIndex нужен для быстрых обновлений по peerId без полного пересоздания
+// списка чатов при каждом incoming_message.
 const chatIndex = reactive<Record<string, ChatItem>>({});
+// История сообщений хранится по peerId: username для личных чатов и group:<id>
+// для групповых. Это тот же ключ, который сервер ожидает в командах истории.
 const messagesByPeer = reactive<Record<string, ChatMessage[]>>({});
 const profilesByUsername = reactive<Record<string, UserProfile>>({});
 const aiMessages = ref<AIChatMessage[]>([]);
@@ -176,6 +189,8 @@ const stickLogsToBottom = ref(true);
 const loadingOlderByPeer = reactive<Record<string, boolean>>({});
 const reachedHistoryStartByPeer = reactive<Record<string, boolean>>({});
 
+// Эти словари не reactive, потому что они управляют сетевыми запросами, а не
+// напрямую отрисовываются в шаблоне.
 const syncingRecentByPeer: Record<string, boolean> = {};
 const historyRequestModeByPeer: Record<string, "latest" | "older"> = {};
 const historyBatchCountByPeer: Record<string, number> = {};
@@ -204,6 +219,8 @@ const filteredChats = computed(() => {
   });
 });
 
+// AI-чат не приходит с сервера как обычный chat_item, но должен жить рядом с
+// остальными чатами и участвовать в поиске по списку.
 const showAiChatRow = computed(() => {
   const query = ui.chatFilter.trim().toLowerCase();
   if (!query) {
@@ -283,6 +300,8 @@ const activeContextMessage = computed(() => {
 });
 
 function pushLog(text: string) {
+  // Журнал ограничен последними 200 строками, чтобы длительная сессия не
+  // раздувала память браузера.
   const stamp = new Date().toLocaleString();
   ui.logs.push(`[${stamp}] ${text}`);
   if (ui.logs.length > 200) {
@@ -312,6 +331,8 @@ function formatServerTime(value: string) {
 }
 
 function stableAvatarColor(username: string) {
+  // Цвет fallback-аватара должен быть стабильным между перезагрузками, поэтому
+  // выбираем его через простой hash от username, а не через Math.random().
   const palette = ["#5C7CFA", "#E56B6F", "#3FA37A", "#F4A261", "#7B6CF6", "#4D908E", "#577590", "#BC6C25", "#C8553D", "#8A5CF6"];
   let hash = 2166136261;
   for (let index = 0; index < username.length; index += 1) {
@@ -346,6 +367,8 @@ async function loadAiMessagesForUser(username: string) {
 
   try {
     const parsed = await loadAiChatHistory(username);
+    // IndexedDB хранит данные в браузере, поэтому при чтении не доверяем типам
+    // полностью и нормализуем каждое поле перед показом в интерфейсе.
     aiMessages.value = parsed
       .filter((item) => item && typeof item === "object")
       .map((item) => {
@@ -435,6 +458,8 @@ function cancelAiAttachment() {
 }
 
 function buildAiAttachment(message: ChatMessage): AIAttachment {
+  // Если пользователь пересылает уже пересланное сообщение в AI, берем
+  // оригинального отправителя и оригинальный текст, а не оболочку пересылки.
   const sender = message.forwardFromSender || message.sender;
   const text = message.forwardFromText || message.text;
   return {
@@ -454,6 +479,8 @@ function buildAiRequestContent(instruction: string, attachment: AIAttachment | n
 }
 
 async function requestAiAnswer(messages: { role: string; content: string }[]) {
+  // UI общается только с локальным ai_service. Выбор Ollama/GigaChat спрятан
+  // за этим сервисом, поэтому фронтенд не хранит ключи провайдеров.
   const response = await fetch(`${aiServiceUrl.value}/chat`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -473,6 +500,8 @@ async function requestAiAnswer(messages: { role: string; content: string }[]) {
 }
 
 function aiMessageToProviderMessage(message: AIChatMessage) {
+  // Роль "error" нужна только UI. В контекст модели такие сообщения отправляем
+  // как assistant, чтобы провайдер получил валидный формат.
   const role = message.role === "user" ? "user" : "assistant";
   return {
     role,
@@ -481,6 +510,8 @@ function aiMessageToProviderMessage(message: AIChatMessage) {
 }
 
 function appendAiMessage(message: AIChatMessage) {
+  // Присваиваем новый массив, а не push(), чтобы Vue гарантированно увидел
+  // изменение ref и обновил список сообщений.
   aiMessages.value = [...aiMessages.value, message];
   void persistAiMessages();
   nextTick(() => {
@@ -513,6 +544,8 @@ async function sendAiMessage() {
   ui.messageDraft = "";
   ui.aiSending = true;
 
+  // В провайдер отправляем только последние пары user/assistant. Полная история
+  // остается в локальном кэше, но не раздувает каждый AI-запрос.
   const conversation = aiMessages.value
     .filter((item) => item.role === "user" || item.role === "assistant")
     .slice(-AI_CONTEXT_LIMIT)
@@ -645,6 +678,8 @@ async function rewriteDraftWithAi(instruction: string) {
   ui.aiRewriteLoading = true;
   ui.aiRewriteError = "";
   try {
+    // AI-переписывание работает только с текущим черновиком, без истории чата:
+    // так модель не утягивает личный контекст собеседника без необходимости.
     const answer = await requestAiAnswer([
       {
         role: "system",
@@ -700,6 +735,8 @@ function applyProfileFromFields(fields: string[]) {
     return null;
   }
 
+  // Порядок полей должен совпадать с server/src/MessengerServer.cpp
+  // buildUserProfileFields(). Здесь превращаем строковый online-флаг в boolean.
   const profile: UserProfile = {
     username,
     displayName: fields[1] || username,
@@ -739,6 +776,8 @@ function requestProfiles(usernames: string[]) {
     return;
   }
 
+  // Профили запрашиваются пачкой и dedupe-ятся, чтобы при загрузке истории
+  // не отправлять get_profile для каждого сообщения отдельно.
   const unique = Array.from(new Set(usernames.map((username) => username.trim()).filter(Boolean)));
   const missing = unique.filter((username) => !profilesByUsername[username] && !pendingProfilesBatch.has(username));
   if (missing.length === 0) {
@@ -872,6 +911,8 @@ function chatPreview(chat: ChatItem) {
 }
 
 function parseChatMessage(fields: string[], offset = 0) {
+  // offset нужен для результатов команд вида send_message_result:
+  // первые поля заняты status/text, а само сообщение начинается дальше.
   if (fields.length < offset + 6) {
     return null;
   }
@@ -913,6 +954,8 @@ function displayedMessageText(message: ChatMessage) {
 }
 
 function chatPreviewText(message: ChatMessage) {
+  // Превью в списке чатов не должно раскрывать текст удаленного сообщения,
+  // даже если старый текст все еще есть в локальном объекте.
   if (isMessageDeleted(message)) {
     return DELETED_MESSAGE_TEXT;
   }
@@ -934,6 +977,8 @@ function peerForMessage(message: ChatMessage) {
 }
 
 function dedupeAndSortMessages(messages: ChatMessage[]) {
+  // История может прийти из IndexedDB и с сервера одновременно. Последняя
+  // версия по id побеждает, затем сообщения сортируются по возрастанию id.
   const messageMap = new Map<number, ChatMessage>();
   for (const message of messages) {
     messageMap.set(message.id, message);
@@ -977,6 +1022,8 @@ function sortChats() {
   });
 
   const current = chats.value;
+  // Vue перерисовывает список при замене массива. Проверка на реальное
+  // изменение порядка/превью снижает лишние обновления во время fetch_chats.
   const sameOrder =
     current.length === nextChats.length &&
     current.every((chat, index) => {
@@ -1035,6 +1082,8 @@ function excerpt(value: string, limit = 90) {
 }
 
 function escapeField(value: string) {
+  // Клиентский web-протокол повторяет common::escapeField на C++ стороне:
+  // tab/newline/backslash должны оставаться частью поля, а не ломать строку.
   return value
     .replaceAll("\\", "\\\\")
     .replaceAll("\t", "\\t")
@@ -1071,6 +1120,8 @@ function serialize(command: string, fields: string[] = []) {
 }
 
 function parseLine(line: string): ProtocolMessage | null {
+  // Bridge отдает сырую строку от C++ сервера. Здесь превращаем ее в простую
+  // структуру {command, fields}, которую дальше обрабатывает handleProtocolMessage.
   const trimmed = line.replace(/[\r\n]+$/g, "");
   if (!trimmed) {
     return null;
@@ -1098,10 +1149,14 @@ function sendBridge(payload: object) {
 }
 
 function sendCommand(command: string, fields: string[] = []) {
+  // Все команды на сервер идут через bridge одним типом "send"; сам bridge
+  // добавит '\n' и передаст строку в TLS socket.
   sendBridge({ type: "send", line: serialize(command, fields) });
 }
 
 function clearSessionData() {
+  // При logout/потере соединения чистим и серверные данные UI, и локальные
+  // временные состояния, чтобы следующий пользователь не увидел чужой экран.
   session.selectedPeer = "";
   ui.messageDraft = "";
   ui.chatFilter = "";
@@ -1234,6 +1289,8 @@ function connectBridge() {
       if (pendingAuth) {
         const currentAuth = pendingAuth;
         pendingAuth = null;
+        // Авторизация могла начаться до готовности TCP-соединения. Сохраняем
+        // команду и отправляем ее сразу после подтверждения от bridge.
         if (currentAuth.mode === "register") {
           sendCommand("register", [currentAuth.username, currentAuth.password]);
         } else {
@@ -1305,6 +1362,8 @@ function requestLatestHistory(peer: string) {
     return;
   }
 
+  // После открытия чата всегда просим сервер прислать свежий хвост истории:
+  // локальный IndexedDB нужен только для быстрого первого отображения.
   syncingRecentByPeer[peer] = true;
   historyRequestModeByPeer[peer] = "latest";
   historyBatchCountByPeer[peer] = 0;
@@ -1330,6 +1389,8 @@ async function selectPeer(peer: string) {
   if (runtimeMessages.length === 0 && session.currentUser) {
     try {
       const cachedMessages = await loadCachedMessages(session.currentUser, peer);
+      // Пользователь мог переключиться в другой чат, пока IndexedDB читался.
+      // Не подмешиваем старый результат в новый выбранный чат.
       if (session.selectedPeer !== peer) {
         return;
       }
@@ -1353,6 +1414,8 @@ async function selectPeer(peer: string) {
 function pushMessage(peer: string, message: ChatMessage) {
   const arr = messagesByPeer[peer] ?? (messagesByPeer[peer] = []);
   const existingIndex = arr.findIndex((item) => item.id === message.id);
+  // Сервер может сначала прислать сообщение из истории, а затем обновленную
+  // версию после удаления. Поэтому по id обновляем существующую запись.
   if (existingIndex >= 0) {
     arr.splice(existingIndex, 1, message);
   } else {
@@ -1378,6 +1441,8 @@ function updateChatPreviewFromMessage(peer: string, message: ChatMessage, unread
     return false;
   }
 
+  // Список чатов обновляется оптимистично по последнему сообщению, чтобы UI не
+  // ждал полного fetch_chats после каждого incoming_message.
   existingChat.lastAt = message.createdAt;
   existingChat.lastSender = message.sender;
   existingChat.lastText = chatPreviewText(message);
@@ -1648,6 +1713,8 @@ function submitForward() {
   }
 
   const fields = [peerId, ui.forwardTarget.chatId, String(ui.forwardTarget.id)];
+  // Комментарий к пересылке опционален: если он есть, сервер отправит его как
+  // новое сообщение рядом с пересланным.
   if (ui.forwardDraft.trim()) {
     fields.push(ui.forwardDraft.trim());
   }
@@ -1765,6 +1832,8 @@ function jumpToMessage(messageId: number | null) {
   }
 
   nextTick(() => {
+    // Ответ может ссылаться на сообщение, которое уже не попало в текущую
+    // страницу истории. В этом случае просто пишем подсказку в журнал.
     const target = document.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
     if (!target) {
       pushLog(`Сообщение #${messageId} не загружено в текущем окне истории`);
@@ -1800,6 +1869,8 @@ function loadOlderMessages(peer: string) {
 
   const viewport = messagesViewport.value;
   if (viewport && session.selectedPeer === peer) {
+    // При догрузке старых сообщений сверху сохраняем позицию прокрутки.
+    // После вставки истории восстановим визуально тот же фрагмент диалога.
     olderScrollStateByPeer[peer] = {
       oldScrollHeight: viewport.scrollHeight,
       oldScrollTop: viewport.scrollTop,

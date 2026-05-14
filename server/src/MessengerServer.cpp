@@ -77,6 +77,8 @@ namespace {
     }
 
     bool parsePositiveInt(const std::string& value, int& output) {
+        // std::stoi бросает исключения и принимает префиксы вроде "12abc".
+        // Здесь нужен строгий разбор, потому что значение приходит из сети.
         if (value.empty()) {
             return false;
         }
@@ -104,6 +106,8 @@ namespace {
     }
 
     bool parsePositiveInt64(const std::string& value, long long& output) {
+        // Отдельная версия для message_id/group_id: эти значения могут быть
+        // больше int, но также должны быть строго положительными числами.
         if (value.empty()) {
             return false;
         }
@@ -134,6 +138,8 @@ namespace {
         std::vector<std::string> items;
         std::stringstream input(value);
         std::string token;
+        // В протоколе списки участников передаются одним полем через запятую.
+        // Пустые элементы пропускаем, чтобы "alice,,bob" не создавал пустой username.
         while (std::getline(input, token, ',')) {
             if (!token.empty()) {
                 items.push_back(token);
@@ -143,6 +149,8 @@ namespace {
     }
 
     std::string makeGroupChatId(long long groupId) {
+        // В web-клиенте один selectedPeer хранит и личные чаты, и группы.
+        // Префикс group: не конфликтует с username и явно показывает тип чата.
         return "group:" + std::to_string(groupId);
     }
 
@@ -165,6 +173,8 @@ namespace {
     }
 
     std::string hexEncode(const unsigned char* data, std::size_t size) {
+        // OpenSSL возвращает hash как бинарные байты. В базе удобнее хранить
+        // hex-строку: она переносима, читаема в логах и не содержит нулевых байтов.
         std::ostringstream out;
         out << std::hex << std::setfill('0');
         for (std::size_t i = 0; i < size; ++i) {
@@ -176,6 +186,8 @@ namespace {
     std::vector<std::string> buildStoredMessageFields(const StoredMessage& storedMessage,
                                                       const std::string& chatId,
                                                       const std::string& recipientLabel) {
+        // Порядок полей здесь является контрактом с web/src/App.vue::parseChatMessage.
+        // При добавлении нового поля нужно обновить обе стороны протокола.
         return {
             std::to_string(storedMessage.id),
             chatId,
@@ -195,6 +207,8 @@ namespace {
     }
 
     std::vector<std::string> buildUserProfileFields(const UserProfile& profile, bool online) {
+        // Профиль тоже отправляется списком строк, поэтому bool online кодируем
+        // как "1"/"0", а не как локализованный текст.
         return {
             profile.username,
             profile.displayName,
@@ -259,6 +273,8 @@ bool MessengerServer::start() {
 
     SSL_CTX_set_min_proto_version(sslContext_, TLS1_2_VERSION);
 
+    // Сервер использует локальный сертификат из certs/. Для учебного проекта
+    // web bridge принимает self-signed сертификат, а данные все равно идут по TLS.
     if (SSL_CTX_use_certificate_file(sslContext_, kServerCertificatePath, SSL_FILETYPE_PEM) != 1) {
         return failStart(
             "Cannot load TLS certificate " + std::string(kServerCertificatePath) + ": " + lastOpenSslError());
@@ -291,6 +307,7 @@ bool MessengerServer::start() {
     address.sin_family = AF_INET;
     address.sin_port = htons(static_cast<uint16_t>(port_));
 
+    // inet_pton валидирует адрес и переводит его в бинарный вид, который ожидает bind.
     if (::inet_pton(AF_INET, bindAddress_.c_str(), &address.sin_addr) != 1) {
         return failStart("Invalid bind address: " + bindAddress_);
     }
@@ -372,6 +389,8 @@ void MessengerServer::run(const std::function<bool()>& shouldStop) {
         }
 
         SSL_set_fd(session->ssl, clientSocket);
+        // TLS handshake выполняется сразу после accept. Если handshake не прошел,
+        // сессию не добавляем в общий список, потому что прикладной протокол еще не начался.
         if (SSL_accept(session->ssl) != 1) {
             std::cerr << "TLS handshake failed for " << session->peer << ": " << lastOpenSslError() << '\n';
             SSL_free(session->ssl);

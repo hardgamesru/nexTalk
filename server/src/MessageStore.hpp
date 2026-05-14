@@ -7,52 +7,82 @@
 struct sqlite3;
 
 /**
- * One persisted chat message loaded from SQLite.
+ * Одно сообщение, загруженное из SQLite.
+ *
+ * Структура специально близка к полям протокола: сервер почти без
+ * преобразований отправляет StoredMessage клиенту как history_message,
+ * incoming_message или send_message_result.
  */
 struct StoredMessage {
+    // Уникальный id сообщения в общей таблице messages.
     long long id{0};
+    // Серверное время создания в текстовом формате.
     std::string createdAt;
+    // Автор сообщения. Для системных сообщений группы может быть пустым.
     std::string sender;
+    // Получатель: username для личного чата или group:<id> для группы.
     std::string recipient;
     std::string text;
+    // Поля ответа: id исходного сообщения и короткий снимок его автора/текста.
     long long replyToMessageId{0};
     std::string replyToSender;
     std::string replyToText;
+    // Поля пересылки: ссылка на оригинал и сохраненный текст на момент пересылки.
     long long forwardFromMessageId{0};
     std::string forwardFromSender;
     std::string forwardFromText;
+    // Мягкое удаление: запись остается в базе, но клиент показывает заглушку.
     std::string deletedAt;
     std::string deletedBy;
 };
 
+/**
+ * Короткая карточка диалога для списка чатов.
+ */
 struct ChatSummary {
+    // Для личного чата это username собеседника, для группы строка group:<id>.
     std::string peerId;
+    // Отображаемое имя: username/display name или название группы.
     std::string peer;
     std::string lastAt;
     std::string lastSender;
     std::string lastText;
     int unreadCount{0};
+    // Эти флаги помогают клиенту выбрать правильные кнопки в UI.
     bool isGroup{false};
     bool canManage{false};
 };
 
+/**
+ * Результат поиска пользователя для создания личного или группового чата.
+ */
 struct UserSearchResult {
     std::string id;
     std::string username;
 };
 
+/**
+ * Участник группы вместе с признаком администратора.
+ */
 struct GroupMemberInfo {
     std::string username;
     bool isAdmin{false};
 };
 
+/**
+ * Метаданные группы, которые нужны окну настроек.
+ */
 struct GroupInfo {
     std::string chatId;
     std::string name;
     std::string adminUsername;
+    // true, если requester является администратором этой группы.
     bool canManage{false};
 };
 
+/**
+ * Публичный профиль пользователя. Пароли и соли здесь намеренно не живут.
+ */
 struct UserProfile {
     std::string username;
     std::string displayName;
@@ -106,6 +136,9 @@ public:
                            const std::string& avatarColor,
                            std::string& error);
     bool updateUserLastSeen(const std::string& username, std::string& error);
+
+    // Сохраняет личное сообщение. Если replyToMessageId или forwardFromMessageId
+    // заполнены, MessageStore проверяет доступность исходного сообщения.
     bool saveMessage(const std::string& sender,
                      const std::string& recipient,
                      const std::string& text,
@@ -119,6 +152,8 @@ public:
                                long long messageId,
                                StoredMessage& message,
                                std::string& error);
+    // То же, но дополнительно ограничивает поиск конкретным чатом. Это важно
+    // для удаления/ответа, чтобы пользователь не мог сослаться на чужой диалог.
     bool loadAccessibleMessageInChat(const std::string& username,
                                      const std::string& chatId,
                                      long long messageId,
@@ -129,6 +164,8 @@ public:
                       int limit,
                       std::vector<StoredMessage>& messages,
                       std::string& error);
+    // Пагинация вверх: клиент передает id самого старого загруженного сообщения,
+    // а сервер возвращает пачку сообщений строго раньше него.
     bool fetchHistoryBefore(const std::string& user,
                             const std::string& peer,
                             long long beforeMessageId,
@@ -141,6 +178,8 @@ public:
     bool fetchChats(const std::string& user,
                     std::vector<ChatSummary>& chats,
                     std::string& error);
+    // scope/scopeTarget позволяют переиспользовать поиск: обычный поиск,
+    // добавление в группу и создание группы имеют разные исключения.
     bool searchUsers(const std::string& query,
                      const std::string& excludeUser,
                      const std::string& scope,
@@ -152,6 +191,8 @@ public:
                             long long peerId,
                             std::string& peerUsername,
                             std::string& error);
+    // При создании группы creator может сразу назначить другого администратора,
+    // если этот пользователь входит в список участников.
     bool createGroup(const std::string& creator,
                      const std::string& name,
                      const std::string& adminUsername,
@@ -183,6 +224,8 @@ public:
                      long long groupId,
                      std::vector<std::string>& removedUsers,
                      std::string& error);
+    // Для группового сообщения возвращаем не только StoredMessage, но и список
+    // участников, которым сервер должен отправить incoming_message.
     bool saveGroupMessage(const std::string& sender,
                           long long groupId,
                           const std::string& text,
@@ -207,6 +250,8 @@ public:
                        std::string& chatId,
                        std::vector<std::string>& audienceUsernames,
                        std::string& error);
+    // Удаление личного диалога полностью стирает conversation и связанные
+    // сообщения. Группы удаляются отдельным deleteGroup.
     bool deleteConversation(const std::string& user,
                             const std::string& peer,
                             std::string& error);

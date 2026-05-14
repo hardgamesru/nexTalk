@@ -10,8 +10,11 @@ from providers import ProviderError, build_provider_from_env, normalize_messages
 
 HOST = os.getenv("AI_SERVICE_HOST", "127.0.0.1")
 PORT = int(os.getenv("AI_SERVICE_PORT", "5000"))
+# Ограничения ниже защищают локальный сервис от слишком больших запросов из UI.
 MAX_BODY_BYTES = int(os.getenv("AI_SERVICE_MAX_BODY_BYTES", "65536"))
 MAX_MESSAGES = int(os.getenv("AI_SERVICE_MAX_MESSAGES", "24"))
+# Если список пустой, сервис разрешает localhost/127.0.0.1. Для внешнего web
+# домена нужно явно перечислить origin-ы через запятую.
 ALLOWED_ORIGINS = {
     origin.strip()
     for origin in os.getenv("AI_SERVICE_ALLOWED_ORIGINS", "").split(",")
@@ -43,6 +46,8 @@ class Handler(BaseHTTPRequestHandler):
             provider_name, model, provider = build_provider_from_env()
             query = parse_qs(parsed_url.query)
             checked = query.get("check", ["0"])[0] in {"1", "true", "yes"}
+            # Обычный /health отвечает без внешнего запроса. /health?check=1
+            # дополнительно проверяет реальные credentials провайдера.
             if checked:
                 provider.health_check()
         except ProviderError as error:
@@ -82,6 +87,8 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         try:
+            # Провайдер создается из env на каждый запрос, чтобы можно было
+            # поменять настройки перед перезапуском без правок в коде.
             _provider_name, _model, provider = build_provider_from_env()
             answer = provider.chat(messages)
         except ProviderError as error:
@@ -103,6 +110,8 @@ class Handler(BaseHTTPRequestHandler):
         if content_length > MAX_BODY_BYTES:
             raise ValueError("Request body is too large.")
 
+        # decode(errors="replace") не падает на битой кодировке, а дальше JSON
+        # парсер вернет понятную ошибку пользователю.
         raw_body = self.rfile.read(content_length).decode("utf-8", errors="replace")
         if not raw_body.strip():
             raise ValueError("Request body is empty.")
@@ -122,6 +131,8 @@ class Handler(BaseHTTPRequestHandler):
             return True
         if origin in ALLOWED_ORIGINS:
             return True
+        # По умолчанию разрешаем только локальный web-клиент Vite.
+        # Для деплоя на другом домене нужно явно задать AI_SERVICE_ALLOWED_ORIGINS.
         return origin.startswith("http://localhost:") or origin.startswith("http://127.0.0.1:")
 
     def _send_cors_headers(self) -> None:

@@ -16,6 +16,8 @@ namespace {
         hints.ai_family = AF_UNSPEC;
         hints.ai_socktype = SOCK_STREAM;
 
+        // getaddrinfo поддерживает и localhost, и IP-адреса. Это удобнее, чем
+        // вручную разбирать IPv4/IPv6 в клиентском коде.
         addrinfo* results = nullptr;
         const std::string service = std::to_string(port);
         const int lookup = ::getaddrinfo(host.c_str(), service.c_str(), &hints, &results);
@@ -25,6 +27,8 @@ namespace {
         }
 
         int socket = -1;
+        // У hostname может быть несколько адресов. Пробуем каждый, пока один
+        // socket успешно не подключится.
         for (addrinfo* current = results; current != nullptr; current = current->ai_next) {
             socket = ::socket(current->ai_family, current->ai_socktype, current->ai_protocol);
             if (socket < 0) {
@@ -66,6 +70,8 @@ bool ClientConnection::connectToServer(const std::string& host, int port, std::s
         return false;
     }
 
+    // Если объект переиспользуется после stop(), старый receiverThread уже
+    // должен быть завершен до открытия нового socket.
     if (receiverThread_.joinable() &&
         receiverThread_.get_id() != std::this_thread::get_id()) {
         receiverThread_.join();
@@ -89,6 +95,7 @@ bool ClientConnection::connectToServer(const std::string& host, int port, std::s
 void ClientConnection::stop() {
     const bool wasRunning = running_.exchange(false);
     if (socket_ >= 0) {
+        // shutdown будит receiverLoop, если он сейчас заблокирован в recv().
         ::shutdown(socket_, SHUT_RDWR);
     }
 
@@ -165,6 +172,8 @@ bool ClientConnection::sendMessage(const common::ProtocolMessage& message) {
         return false;
     }
 
+    // common::serializeMessage добавляет '\n', поэтому sendAll отправляет уже
+    // готовую строку протокола.
     return sendAll(common::serializeMessage(message));
 }
 
@@ -196,6 +205,8 @@ bool ClientConnection::readLine(std::string& line) {
     line.clear();
     char ch = '\0';
 
+    // Протокол построчный, а TCP потоковый. Читаем до '\n' и защищаемся от
+    // слишком длинной строки, чтобы поврежденный peer не раздувал память.
     while (line.size() < kMaxLineLength) {
         const ssize_t result = ::recv(socket_, &ch, 1, 0);
         if (result == 0) {
@@ -222,6 +233,8 @@ bool ClientConnection::readLine(std::string& line) {
 void ClientConnection::receiverLoop() {
     std::string line;
 
+    // Receiver thread только читает серверные события и раздает callbacks.
+    // Отправка команд может идти из UI-потока параллельно через writeMutex_.
     while (running_ && readLine(line)) {
         common::ProtocolMessage message;
         if (!common::parseMessage(line, message)) {
@@ -245,6 +258,8 @@ void ClientConnection::receiverLoop() {
 void ClientConnection::handleServerMessage(const common::ProtocolMessage& message) {
     auto callbacks = callbacksSnapshot();
     auto parseMessageItem = [](const std::vector<std::string>& fields, std::size_t offset, HistoryItem& item) -> bool {
+        // Одно и то же представление сообщения используется в разных командах,
+        // но иногда перед ним есть status/text. Поэтому offset задается снаружи.
         if (fields.size() < offset + 5) {
             return false;
         }
