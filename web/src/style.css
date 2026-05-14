@@ -1,5 +1,7 @@
 @import url("https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&display=swap");
 
+/* Базовые дизайн-токены. Остальные стили должны ссылаться на эти переменные,
+   чтобы цветовую тему можно было менять без прохода по всему файлу. */
 :root {
   --bg: #eef1f4;
   --panel: #ffffff;
@@ -20,6 +22,7 @@
   --shadow-pop: 0 18px 44px rgba(31, 45, 61, 0.16);
 }
 
+/* Глобальный reset: делаем размеры элементов предсказуемыми во всех панелях. */
 * {
   box-sizing: border-box;
 }
@@ -39,6 +42,7 @@ body {
   padding: 14px;
 }
 
+/* Основной экран состоит из трех колонок: список чатов, переписка и журнал. */
 .app-shell {
   display: grid;
   grid-template-columns: 320px 1fr 290px;
@@ -46,6 +50,7 @@ body {
   height: calc(100vh - 28px);
 }
 
+/* Панели имеют общий контейнерный стиль, а внутренние секции уже уточняют layout. */
 .sidebar,
 .chat-main,
 .log-panel {
@@ -312,6 +317,7 @@ button:disabled {
   box-shadow: inset 3px 0 0 var(--accent);
 }
 
+/* AI-чат визуально отделен от серверных чатов, но использует ту же сетку строки. */
 .ai-chat-row {
   border-color: rgba(96, 87, 184, 0.22);
   background: var(--ai-soft);
@@ -539,6 +545,7 @@ button:disabled {
   margin-bottom: 12px;
 }
 
+/* Свои сообщения зеркалим: аватар справа, пузырь прижат к правой стороне. */
 .message-row.own {
   grid-template-columns: 1fr 42px;
 }
@@ -590,6 +597,7 @@ button:disabled {
   justify-self: start;
 }
 
+/* Snippet-ы ответа и пересылки лежат внутри пузыря и сохраняют контекст сообщения. */
 .reply-snippet {
   width: 100%;
   margin-top: 8px;
@@ -956,6 +964,7 @@ button:disabled {
   box-shadow: 0 0 0 2px rgba(57, 65, 74, 0.08);
 }
 
+/* Меню AI-переписывания открывается над composer и не влияет на высоту футера. */
 .composer-ai-wrap {
   position: relative;
 }
@@ -1096,6 +1105,8 @@ button:disabled {
   font-style: italic;
 }
 
+/* Модалки используются для форм и подтверждений, поэтому это один из немногих
+   допустимых "card-like" контейнеров в интерфейсе. */
 .modal {
   position: relative;
   width: min(450px, calc(100vw - 20px));

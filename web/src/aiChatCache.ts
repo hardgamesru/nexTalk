@@ -31,6 +31,8 @@ function getDbName(username: string) {
 }
 
 function waitForRequest<T>(request: IDBRequest<T>) {
+  // Приводим IndexedDB callback API к Promise, чтобы код выше не смешивал
+  // несколько стилей асинхронности.
   return new Promise<T>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
@@ -102,6 +104,8 @@ export async function loadAiChatHistory(username: string): Promise<AIChatMessage
 export async function saveAiChatHistory(username: string, messages: AIChatMessage[]): Promise<void> {
   const db = await openAiChatCacheDb(username);
   const transaction = db.transaction(STORE_NAME, "readwrite");
+  // Для AI-чата достаточно одной записи history: нам не нужна выборка по id,
+  // потому что показываем всю локальную AI-переписку текущего пользователя.
   transaction.objectStore(STORE_NAME).put({
     owner: RECORD_KEY,
     messages,

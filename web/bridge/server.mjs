@@ -4,6 +4,8 @@ import { WebSocketServer } from "ws";
 const BRIDGE_PORT = Number.parseInt(process.env.BRIDGE_PORT ?? "5174", 10);
 const DEFAULT_HOST = process.env.NEXTALK_HOST ?? "127.0.0.1";
 const DEFAULT_TCP_PORT = Number.parseInt(process.env.NEXTALK_PORT ?? "5555", 10);
+// Ограничение строки должно совпадать по смыслу с C++ kMaxLineLength.
+// Оно защищает bridge от бесконечного буфера, если сервер или клиент сломались.
 const MAX_LINE_LENGTH = Number.parseInt(process.env.BRIDGE_MAX_LINE_LENGTH ?? "8192", 10);
 const ALLOWED_HOSTS = new Set(
   (process.env.BRIDGE_ALLOWED_HOSTS ?? "127.0.0.1,localhost,::1")
@@ -21,6 +23,8 @@ const ALLOWED_ORIGINS = new Set(
 const wss = new WebSocketServer({ host: "127.0.0.1", port: BRIDGE_PORT });
 
 function isAllowedOrigin(origin) {
+  // В dev-режиме браузер обычно приходит с origin вида http://localhost:5173.
+  // Для production-домена лучше задать BRIDGE_ALLOWED_ORIGINS явно.
   if (!origin) {
     return true;
   }
@@ -62,6 +66,7 @@ wss.on("connection", (ws, request) => {
   let readBuffer = "";
 
   const closeTcp = () => {
+    // destroy безопасен для уже закрытого socket и сразу будит все listeners.
     if (!tcp) {
       return;
     }
@@ -71,6 +76,8 @@ wss.on("connection", (ws, request) => {
   };
 
   const ensureConnected = (host, port) => {
+    // Не открываем второе TCP-соединение для одного web socket. Если UI уже
+    // подключен, следующие connect-сообщения считаем идемпотентными.
     if (tcp && !tcp.destroyed) {
       return;
     }

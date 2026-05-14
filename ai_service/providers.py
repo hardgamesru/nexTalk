@@ -15,6 +15,8 @@ from typing import Iterable
 
 
 class ProviderError(Exception):
+    # status_code пробрасывается наружу в HTTP-ответ ai_service. Так UI видит
+    # понятную ошибку, а не всегда одинаковый 500.
     def __init__(self, message: str, *, status_code: int = 502):
         super().__init__(message)
         self.message = message
@@ -47,6 +49,8 @@ class OllamaProvider(AIProvider):
         self.timeout_seconds = timeout_seconds
 
     def chat(self, messages: list[dict[str, str]]) -> str:
+        # Ollama поддерживает OpenAI-like список role/content, поэтому фронтенд
+        # может использовать тот же формат для всех провайдеров.
         payload = {
             "model": self.model,
             "stream": False,
@@ -114,6 +118,8 @@ class GigaChatProvider(AIProvider):
         self.ssl_context = ssl_context
 
     def health_check(self) -> None:
+        # Для GigaChat health-check проверяет именно OAuth, потому что без токена
+        # последующий /chat все равно не сможет работать.
         self._access_token()
 
     def chat(self, messages: list[dict[str, str]]) -> str:
@@ -194,6 +200,7 @@ class GigaChatProvider(AIProvider):
                 "Accept": "application/json",
                 "Authorization": _basic_auth_header(self.auth_key),
                 "Content-Type": "application/x-www-form-urlencoded",
+                # RqUID обязателен для GigaChat OAuth: это уникальный id запроса.
                 "RqUID": str(uuid.uuid4()),
             },
             method="POST",
@@ -253,6 +260,8 @@ class OpenAIProvider(AIProvider):
 
 
 def build_provider_from_env() -> tuple[str, str, AIProvider]:
+    # Единая фабрика провайдеров держит настройки в env, а не в UI. Благодаря
+    # этому пользователям web-клиента не нужно знать API-ключи.
     provider_name = os.getenv("AI_PROVIDER", "ollama").strip().lower() or "ollama"
     timeout_seconds = _load_timeout(os.getenv("AI_REQUEST_TIMEOUT", "45"))
 
@@ -344,6 +353,8 @@ def _build_ssl_context() -> ssl.SSLContext | None:
 
 
 def _basic_auth_header(auth_key: str) -> str:
+    # В .env удобно хранить либо чистый Authorization key, либо уже готовое
+    # значение вида "Basic ...". Поддерживаем оба варианта.
     return auth_key if auth_key.lower().startswith("basic ") else f"Basic {auth_key}"
 
 

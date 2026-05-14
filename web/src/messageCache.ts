@@ -37,6 +37,8 @@ function makeCacheKey(username: string, peer: string, message: ChatMessage) {
 }
 
 function waitForRequest<T>(request: IDBRequest<T>) {
+  // IndexedDB использует callback API. Оборачиваем его в Promise, чтобы
+  // остальной код мог быть линейным async/await.
   return new Promise<T>((resolve, reject) => {
     request.onsuccess = () => resolve(request.result);
     request.onerror = () => reject(request.error ?? new Error("IndexedDB request failed"));
@@ -44,6 +46,8 @@ function waitForRequest<T>(request: IDBRequest<T>) {
 }
 
 function waitForTransaction(transaction: IDBTransaction) {
+  // В IndexedDB успешный put/delete еще не значит, что транзакция завершена.
+  // Дожидаемся oncomplete перед тем, как считать данные сохраненными.
   return new Promise<void>((resolve, reject) => {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB transaction failed"));
@@ -52,6 +56,8 @@ function waitForTransaction(transaction: IDBTransaction) {
 }
 
 function peerRange(peer: string) {
+  // Индекс peerAndId составной. Такой диапазон выбирает все сообщения одного
+  // peer от самого маленького id до максимально возможного.
   return IDBKeyRange.bound([peer, 0], [peer, Number.MAX_SAFE_INTEGER]);
 }
 
@@ -121,6 +127,7 @@ export async function loadCachedMessages(username: string, peer: string): Promis
   const store = transaction.objectStore(STORE_NAME);
   const index = store.index("peerAndId");
   const records = await waitForRequest(index.getAll(peerRange(peer))) as CachedMessageRecord[];
+  // cacheKey/owner/peer нужны только IndexedDB, в UI возвращаем чистые ChatMessage.
   return records
     .sort((left, right) => left.id - right.id)
     .map(({ cacheKey: _cacheKey, owner: _owner, peer: _peer, ...message }) => ({
