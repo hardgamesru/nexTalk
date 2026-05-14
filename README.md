@@ -20,7 +20,7 @@ NexTalk - клиент-серверный мессенджер для UNIX/POSIX
 - Ответы на сообщения, пересылка и мягкое удаление сообщений "у всех".
 - Профили пользователей: display name, bio, цветной avatar-circle с инициалами,
   `created_at`, `last_seen`, online/offline статус.
-- Отдельный локальный AI-чат `NexTalk AI` через `ai_service` и Ollama.
+- Отдельный AI-чат `NexTalk AI` через `ai_service` и выбранный AI-провайдер.
 - Быстрый `AI Reply` для генерации ответа в текущий чат без сохранения в AI-историю.
 - История сообщений (SQLite), в том числе для offline-сценария.
 - Непрочитанные сообщения на сервере (`conversation_reads`, `mark_read`).
@@ -38,7 +38,7 @@ NexTalk - клиент-серверный мессенджер для UNIX/POSIX
 - `common/` - общий протокол (парсинг/сериализация).
 - `web/` - Vue-фронтенд и bridge (`web/bridge/server.mjs`).
 - `docs/` - документация для отчета и сдачи.
-- `ai_service/` - локальный HTTP-сервис для AI-провайдеров (сейчас Ollama).
+- `ai_service/` - локальный HTTP-сервис для AI-провайдеров (Ollama или GigaChat API).
 
 ## Требования
 
@@ -116,7 +116,58 @@ npm run dev
 
 4. Открыть адрес Vite (обычно `http://localhost:5173`).
 
-## Запуск AI-чата через Ollama
+## Запуск AI-чата
+
+Frontend не ходит к AI-провайдеру напрямую. Он отправляет запросы в локальный
+`ai_service`, а `ai_service` уже выбирает провайдера через `AI_PROVIDER`.
+
+### Вариант 1. GigaChat API
+
+Этот вариант не требует локально поднимать модель. Нужен ключ авторизации
+GigaChat API (`Client ID:Client Secret`, закодированные в Base64).
+
+```bash
+cd ai_service
+AI_PROVIDER=gigachat \
+GIGACHAT_AUTH_KEY=<ваш_ключ_авторизации> \
+python3 app.py
+```
+
+`GIGACHAT_AUTH_KEY` можно передать как сам Base64-ключ или как строку с
+префиксом `Basic ...`: service нормализует заголовок сам. Токен доступа
+получается автоматически при первом AI-запросе. Чтобы проверить авторизацию
+сразу, откройте:
+
+```bash
+curl 'http://127.0.0.1:5000/health?check=1'
+```
+
+При успешной проверке ответ будет содержать `"status": "ok"` и
+`"checked": true`.
+
+Ключ GigaChat хранится только на стороне `ai_service` в переменной окружения и
+не отправляется в браузер. Все пользователи web-клиента используют этот один
+server-side ключ, поэтому лимиты и расходы относятся к аккаунту владельца
+`ai_service`.
+
+Если проверка возвращает ошибку `CERTIFICATE_VERIFY_FAILED`, значит локальный
+Python не доверяет цепочке сертификатов GigaChat. Для постоянного решения лучше
+указать CA bundle через `GIGACHAT_CA_FILE`. Для быстрой локальной проверки можно
+временно запустить с `GIGACHAT_VERIFY_SSL=0`.
+
+Полезные переменные:
+
+- `GIGACHAT_MODEL` - модель, по умолчанию `GigaChat`;
+- `GIGACHAT_SCOPE` - scope OAuth, по умолчанию `GIGACHAT_API_PERS`;
+- `GIGACHAT_BASE_URL` - базовый адрес API, по умолчанию
+  `https://gigachat.devices.sberbank.ru/api/v1`;
+- `GIGACHAT_AUTH_URL` - endpoint получения токена, по умолчанию
+  `https://ngw.devices.sberbank.ru:9443/api/v2/oauth`;
+- `GIGACHAT_CA_FILE` - путь к CA bundle, если системное хранилище сертификатов
+  не доверяет цепочке GigaChat;
+- `GIGACHAT_VERIFY_SSL=0` - только для локальной отладки проблем с сертификатом.
+
+### Вариант 2. Ollama локально
 
 1. Убедиться, что модель скачана:
 
@@ -182,14 +233,13 @@ npm run dev
 
 ### Как устроена замена провайдера
 
-Frontend не ходит в Ollama напрямую. Схема такая:
+Frontend не ходит к AI-провайдеру напрямую. Схема такая:
 
-`Vue frontend -> ai_service -> provider -> Ollama`
+`Vue frontend -> ai_service -> provider -> Ollama/GigaChat`
 
-Сейчас по умолчанию используется `AI_PROVIDER=ollama`, но в `ai_service` уже
-есть provider abstraction (`AIProvider`, `OllamaProvider`, `OpenAIProvider`),
-поэтому позже локальную Ollama можно будет заменить на облачный API без
-переписывания web-интерфейса и без изменений в обычных чатах.
+По умолчанию используется `AI_PROVIDER=ollama`. Чтобы не поднимать модель
+локально, можно запустить `ai_service` с `AI_PROVIDER=gigachat` и
+`GIGACHAT_AUTH_KEY`.
 
 ## Куда смотреть в документации
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import parse_qs, urlparse
 
 from providers import ProviderError, build_provider_from_env, normalize_messages
 
@@ -33,12 +34,17 @@ class Handler(BaseHTTPRequestHandler):
         if not self._is_origin_allowed():
             self._send_json(403, {"status": "error", "error": "origin_not_allowed"})
             return
-        if self.path != "/health":
+        parsed_url = urlparse(self.path)
+        if parsed_url.path != "/health":
             self._send_json(404, {"status": "error", "error": "not_found"})
             return
 
         try:
-            provider_name, model, _provider = build_provider_from_env()
+            provider_name, model, provider = build_provider_from_env()
+            query = parse_qs(parsed_url.query)
+            checked = query.get("check", ["0"])[0] in {"1", "true", "yes"}
+            if checked:
+                provider.health_check()
         except ProviderError as error:
             self._send_json(error.status_code, {"status": "error", "error": error.message})
             return
@@ -49,6 +55,7 @@ class Handler(BaseHTTPRequestHandler):
                 "status": "ok",
                 "provider": provider_name,
                 "model": model,
+                "checked": checked,
             },
         )
 
@@ -137,7 +144,12 @@ class Handler(BaseHTTPRequestHandler):
 
 if __name__ == "__main__":
     server = ThreadingHTTPServer((HOST, PORT), Handler)
-    print(f"AI service started on http://{HOST}:{PORT}")
+    try:
+        provider_name, model, _provider = build_provider_from_env()
+        print(f"AI service started on http://{HOST}:{PORT} provider={provider_name} model={model}")
+        print(f"Run http://{HOST}:{PORT}/health?check=1 to verify provider credentials.")
+    except ProviderError as error:
+        print(f"AI service started on http://{HOST}:{PORT} provider_error={error.message}")
     try:
         server.serve_forever()
     except KeyboardInterrupt:
