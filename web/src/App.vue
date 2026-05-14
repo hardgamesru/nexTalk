@@ -55,17 +55,17 @@ const AI_CHAT_ID = "__ai__";
 const AI_CHAT_NAME = "NexTalk AI";
 const AI_CONTEXT_LIMIT = 12;
 const AI_SYSTEM_PROMPT =
-  "You are NexTalk AI, a helpful assistant inside a messenger. Focus on the user's latest request and any forwarded message attached to it. Reply directly, naturally, and in the same language as the user's latest message unless the user explicitly asks for another language. Do not add meta-introductions like 'Here is the answer'.";
+  "Ты NexTalk AI, полезный ассистент внутри мессенджера. Сосредоточься на последнем запросе пользователя и прикрепленном пересланном сообщении, если оно есть. Отвечай прямо, естественно и на языке последнего сообщения пользователя, если он явно не попросил другой язык. Не добавляй вступления вроде 'Вот ответ'.";
 const AI_REWRITE_PRESETS = [
-  "Formal",
-  "Friendly",
-  "Shorter",
-  "More detailed",
-  "Funny",
-  "Apologetic",
-  "Confident",
-  "Fix grammar",
-  "Translate to English",
+  "Официальнее",
+  "Дружелюбнее",
+  "Короче",
+  "Подробнее",
+  "С юмором",
+  "С извинением",
+  "Увереннее",
+  "Исправить текст",
+  "Перевести на английский",
 ] as const;
 
 const bridgeUrl = computed(() => `ws://${window.location.hostname}:5174`);
@@ -95,7 +95,7 @@ const session = reactive({
 const connection = reactive({
   bridgeOpen: false,
   tcpConnected: false,
-  statusLine: "Not connected",
+  statusLine: "Нет подключения",
 });
 
 const ui = reactive({
@@ -299,7 +299,7 @@ function pushLog(text: string) {
 
 function formatServerTime(value: string) {
   if (!value) {
-    return "Pending...";
+    return "Ожидается...";
   }
 
   const normalized = value.replace(" ", "T");
@@ -410,12 +410,12 @@ async function clearAiChat() {
 function aiPreviewText() {
   const lastMessage = aiMessages.value[aiMessages.value.length - 1];
   if (!lastMessage) {
-    return "Local assistant via Ollama";
+    return "AI-помощник для чатов";
   }
   if (lastMessage.role === "user") {
-    return excerpt(lastMessage.content || (lastMessage.attachment?.text ?? "Forwarded message"), 48);
+    return excerpt(lastMessage.content || (lastMessage.attachment?.text ?? "Пересланное сообщение"), 48);
   }
-  return excerpt(lastMessage.content || "Ready to help", 48);
+  return excerpt(lastMessage.content || "Готов помочь", 48);
 }
 
 function openAiChat() {
@@ -450,7 +450,7 @@ function buildAiRequestContent(instruction: string, attachment: AIAttachment | n
     return instruction;
   }
 
-  return `Forwarded message:\nSender: ${attachment.sender}\nText: ${attachment.text}\n\nUser task:\n${instruction}`;
+  return `Пересланное сообщение:\nОтправитель: ${attachment.sender}\nТекст: ${attachment.text}\n\nЗадача пользователя:\n${instruction}`;
 }
 
 async function requestAiAnswer(messages: { role: string; content: string }[]) {
@@ -465,7 +465,7 @@ async function requestAiAnswer(messages: { role: string; content: string }[]) {
     const errorText =
       data && typeof data.error === "string"
         ? data.error
-        : "AI service is unavailable right now.";
+        : "AI-сервис сейчас недоступен.";
     throw new Error(errorText);
   }
 
@@ -496,7 +496,7 @@ async function sendAiMessage() {
   }
 
   if (attachment && !instruction) {
-    pushLog("AI instruction is required for the attached message");
+    pushLog("Для прикрепленного сообщения нужна инструкция для AI");
     return;
   }
 
@@ -538,7 +538,7 @@ async function sendAiMessage() {
       role: "error",
       content: error instanceof Error
         ? error.message
-        : "AI service is unavailable. Check that Ollama and ai_service are running.",
+        : "AI-сервис недоступен. Проверьте, что ai_service запущен.",
       createdAt: new Date().toISOString(),
       attachment: null,
     });
@@ -549,7 +549,7 @@ async function sendAiMessage() {
 
 function openAiReplyModal(message: ChatMessage) {
   if (isMessageDeleted(message)) {
-    pushLog("Cannot generate a reply for a deleted message");
+    pushLog("Нельзя сгенерировать ответ на удаленное сообщение");
     return;
   }
 
@@ -557,7 +557,7 @@ function openAiReplyModal(message: ChatMessage) {
   ui.aiReplyLoading = false;
   ui.aiReplyTargetPeer = session.selectedPeer;
   ui.aiReplySourceMessage = message;
-  ui.aiReplyInstruction = "Write a short, polite reply that fits this conversation.";
+  ui.aiReplyInstruction = "Напиши короткий вежливый ответ, который подходит к этой переписке.";
   ui.aiReplySuggestion = "";
 }
 
@@ -577,7 +577,7 @@ async function generateAiReply() {
   }
 
   const attachment = buildAiAttachment(sourceMessage);
-  const instruction = ui.aiReplyInstruction.trim() || "Write a short, polite reply that fits this conversation.";
+  const instruction = ui.aiReplyInstruction.trim() || "Напиши короткий вежливый ответ, который подходит к этой переписке.";
 
   ui.aiReplyLoading = true;
   try {
@@ -585,17 +585,17 @@ async function generateAiReply() {
       {
         role: "system",
         content:
-          "Generate a natural chat reply draft. Keep the same language as the source message unless the user explicitly asks for another language. Return only the reply text, without explanations or intro phrases.",
+          "Сгенерируй естественный черновик ответа в чате. Сохрани язык исходного сообщения, если пользователь явно не попросил другой язык. Верни только текст ответа, без пояснений и вступлений.",
       },
       {
         role: "user",
         content:
-          `Message to reply to:\nSender: ${attachment.sender}\nText: ${attachment.text}\n\nUser instruction:\n${instruction}`,
+          `Сообщение, на которое нужно ответить:\nОтправитель: ${attachment.sender}\nТекст: ${attachment.text}\n\nИнструкция пользователя:\n${instruction}`,
       },
     ]);
     ui.aiReplySuggestion = answer;
   } catch (error) {
-    pushLog(error instanceof Error ? `AI Reply error: ${error.message}` : "AI Reply error");
+    pushLog(error instanceof Error ? `Ошибка AI-ответа: ${error.message}` : "Ошибка AI-ответа");
     ui.aiReplySuggestion = "";
   } finally {
     ui.aiReplyLoading = false;
@@ -638,7 +638,7 @@ function toggleAiRewriteMenu() {
 async function rewriteDraftWithAi(instruction: string) {
   const draft = ui.messageDraft.trim();
   if (!draft) {
-    ui.aiRewriteError = "Write a draft first";
+    ui.aiRewriteError = "Сначала напишите черновик";
     return;
   }
 
@@ -649,17 +649,17 @@ async function rewriteDraftWithAi(instruction: string) {
       {
         role: "system",
         content:
-          "Rewrite a chat message draft. Keep the same language as the original draft unless the user explicitly asks for translation. Return only the rewritten message text, without explanations or intro phrases.",
+          "Перепиши черновик сообщения для чата. Сохрани язык исходного черновика, если пользователь явно не попросил перевод. Верни только переписанный текст, без пояснений и вступлений.",
       },
       {
         role: "user",
-        content: `Rewrite this message draft with the following instruction:\n${instruction}\n\nDraft:\n${draft}`,
+        content: `Перепиши этот черновик по инструкции:\n${instruction}\n\nЧерновик:\n${draft}`,
       },
     ]);
     ui.messageDraft = answer;
     closeAiRewriteMenu();
   } catch (error) {
-    ui.aiRewriteError = error instanceof Error ? error.message : "AI rewrite failed";
+    ui.aiRewriteError = error instanceof Error ? error.message : "Не удалось переписать текст через AI";
   } finally {
     ui.aiRewriteLoading = false;
   }
@@ -767,12 +767,12 @@ function formatLastSeen(profile: UserProfile | null) {
     return "";
   }
   if (profile.online) {
-    return "online";
+    return "онлайн";
   }
   if (!profile.lastSeen) {
-    return "offline";
+    return "офлайн";
   }
-  return `last seen ${formatServerTime(profile.lastSeen)}`;
+  return `был(а) ${formatServerTime(profile.lastSeen)}`;
 }
 
 function formatProfileFormStatus() {
@@ -864,7 +864,7 @@ function chatPreviewSenderLabel(chat: ChatItem) {
 
 function chatPreview(chat: ChatItem) {
   if (!chat.lastText) {
-    return "No messages yet";
+    return "Пока нет сообщений";
   }
 
   const sender = chatPreviewSenderLabel(chat);
@@ -1091,7 +1091,7 @@ function parseLine(line: string): ProtocolMessage | null {
 
 function sendBridge(payload: object) {
   if (!ws || ws.readyState !== WebSocket.OPEN) {
-    pushLog("Bridge socket is not open");
+    pushLog("Bridge-сокет не открыт");
     return;
   }
   ws.send(JSON.stringify(payload));
@@ -1191,26 +1191,26 @@ function connectBridge() {
     return;
   }
 
-  connection.statusLine = "Connecting to bridge...";
+  connection.statusLine = "Подключение к bridge...";
   ws = new WebSocket(bridgeUrl.value);
 
   ws.onopen = () => {
     connection.bridgeOpen = true;
-    connection.statusLine = "Bridge connected";
+    connection.statusLine = "Bridge подключен";
     sendBridge({ type: "connect", host: form.host, port: Number(form.port) });
   };
 
   ws.onclose = () => {
     connection.bridgeOpen = false;
     connection.tcpConnected = false;
-    connection.statusLine = "Bridge disconnected";
+    connection.statusLine = "Bridge отключен";
     if (session.loggedIn || auth.inFlight) {
-      resetToWelcome("Connection closed. Please sign in again.");
+      resetToWelcome("Соединение закрыто. Войдите снова.");
     }
   };
 
   ws.onerror = () => {
-    connection.statusLine = "Bridge socket error";
+    connection.statusLine = "Ошибка bridge-сокета";
   };
 
   ws.onmessage = (event) => {
@@ -1218,18 +1218,18 @@ function connectBridge() {
     try {
       payload = JSON.parse(event.data);
     } catch {
-      pushLog("Bridge sent invalid JSON");
+      pushLog("Bridge прислал некорректный JSON");
       return;
     }
 
     if (payload.type === "ready") {
-      pushLog(`Bridge ready on port ${payload.bridgePort}`);
+      pushLog(`Bridge готов на порту ${payload.bridgePort}`);
       return;
     }
 
     if (payload.type === "connected") {
       connection.tcpConnected = true;
-      connection.statusLine = `TCP connected to ${payload.host}:${payload.port}`;
+      connection.statusLine = `TCP подключен к ${payload.host}:${payload.port}`;
       pushLog(connection.statusLine);
       if (pendingAuth) {
         const currentAuth = pendingAuth;
@@ -1245,9 +1245,9 @@ function connectBridge() {
 
     if (payload.type === "disconnected") {
       connection.tcpConnected = false;
-      connection.statusLine = "TCP disconnected";
+      connection.statusLine = "TCP отключен";
       if (session.loggedIn || auth.inFlight) {
-        resetToWelcome("Server disconnected. Please sign in again.");
+        resetToWelcome("Сервер отключился. Войдите снова.");
       }
       return;
     }
@@ -1264,7 +1264,7 @@ function connectBridge() {
 
     if (payload.type === "bridge_error" || payload.type === "tcp_error") {
       connection.statusLine = payload.message;
-      pushLog(`${payload.type}: ${payload.message}`);
+      pushLog(`Ошибка соединения: ${payload.message}`);
     }
   };
 }
@@ -1273,7 +1273,7 @@ function beginAuth(mode: "login" | "register") {
   const username = form.username.trim();
   const password = form.password;
   if (!username || !password) {
-    auth.error = "Username and password are required.";
+    auth.error = "Введите логин и пароль.";
     return;
   }
 
@@ -1525,7 +1525,7 @@ function toggleCreateGroupUser(user: SearchUser) {
 function createGroup() {
   const name = ui.createGroupName.trim();
   if (!name) {
-    pushLog("Group name is required");
+    pushLog("Введите название группы");
     return;
   }
 
@@ -1539,7 +1539,7 @@ function createChatFromSearch(user: SearchUser) {
 }
 
 function deleteChat(peer: string) {
-  if (!confirm(`Delete chat with ${peer}?`)) {
+  if (!confirm(`Удалить чат с ${peer}?`)) {
     return;
   }
   sendCommand("delete_chat", [peer]);
@@ -1616,7 +1616,7 @@ function beginAskAi() {
   }
 
   if (isMessageDeleted(message)) {
-    pushLog("Cannot analyze a deleted message");
+    pushLog("Нельзя анализировать удаленное сообщение");
     closeContextMenu();
     return;
   }
@@ -1654,7 +1654,7 @@ function submitForward() {
 
   sendCommand("forward_message", fields);
   const targetChat = chats.value.find((chat) => chat.peerId === peerId);
-  pushLog(`Forwarding message #${ui.forwardTarget.id} to ${targetChat?.peer ?? peerId}`);
+  pushLog(`Пересылаем сообщение #${ui.forwardTarget.id} в ${targetChat?.peer ?? peerId}`);
   cancelForward();
 }
 
@@ -1718,7 +1718,7 @@ function removeUserFromGroup(username: string) {
   if (!ui.groupSettingsChatId) {
     return;
   }
-  if (!confirm(`Remove ${username} from the group?`)) {
+  if (!confirm(`Удалить ${username} из группы?`)) {
     return;
   }
   sendCommand("remove_group_member", [ui.groupSettingsChatId, username]);
@@ -1728,7 +1728,7 @@ function transferAdmin(username: string) {
   if (!ui.groupSettingsChatId || username === ui.groupSettingsAdminUsername) {
     return;
   }
-  if (!confirm(`Make ${username} the new administrator?`)) {
+  if (!confirm(`Сделать ${username} новым администратором?`)) {
     return;
   }
   sendCommand("transfer_group_admin", [ui.groupSettingsChatId, username]);
@@ -1738,7 +1738,7 @@ function leaveCurrentGroup() {
   if (!ui.groupSettingsChatId) {
     return;
   }
-  if (!confirm("Leave this group?")) {
+  if (!confirm("Выйти из этой группы?")) {
     return;
   }
   sendCommand("leave_group", [ui.groupSettingsChatId]);
@@ -1749,10 +1749,10 @@ function deleteCurrentGroup() {
   if (!ui.groupSettingsChatId) {
     return;
   }
-  if (!confirm("Delete this group for everyone?")) {
+  if (!confirm("Удалить эту группу для всех?")) {
     return;
   }
-  if (!confirm("Please confirm again: delete this group for everyone?")) {
+  if (!confirm("Подтвердите еще раз: удалить эту группу для всех?")) {
     return;
   }
   sendCommand("delete_group", [ui.groupSettingsChatId]);
@@ -1767,7 +1767,7 @@ function jumpToMessage(messageId: number | null) {
   nextTick(() => {
     const target = document.querySelector<HTMLElement>(`[data-message-id="${messageId}"]`);
     if (!target) {
-      pushLog(`Referenced message #${messageId} is not loaded in the current history window`);
+      pushLog(`Сообщение #${messageId} не загружено в текущем окне истории`);
       return;
     }
 
@@ -1834,7 +1834,7 @@ function onLogsScroll() {
 }
 
 function signOut() {
-  if (!confirm("Sign out from the current account?")) {
+  if (!confirm("Выйти из текущего аккаунта?")) {
     return;
   }
 
@@ -1909,7 +1909,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       break;
     case "register_result":
       if (a === "ok") {
-        pushLog(`Register ${a}: ${b}`);
+        pushLog(`Регистрация ${a}: ${b}`);
         if (authCredentials) {
           sendCommand("login", [authCredentials.username, authCredentials.password]);
         }
@@ -1919,9 +1919,9 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         auth.visible = true;
         auth.mode = "login";
         if (b.toLowerCase().includes("already exists")) {
-          auth.error = "Username already exists. Please sign in.";
+          auth.error = "Пользователь уже существует. Попробуйте войти.";
         } else {
-          auth.error = b || "Registration failed";
+          auth.error = b || "Не удалось зарегистрироваться";
         }
       }
       break;
@@ -1948,15 +1948,15 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         auth.inFlight = false;
         auth.visible = true;
         auth.mode = "login";
-        auth.error = b || "Login failed";
+        auth.error = b || "Не удалось войти";
       }
-      pushLog(`Login ${a}: ${b}`);
+      pushLog(`Вход ${a}: ${b}`);
       break;
     case "send_message_result":
       if (a === "ok") {
         const sentMessage = parseChatMessage(message.fields, 1);
         if (!sentMessage) {
-          pushLog("Send result parse error");
+          pushLog("Ошибка разбора результата отправки");
           break;
         }
 
@@ -1969,13 +1969,13 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         }
         sendCommand("mark_read", [peer]);
       } else {
-        pushLog(`Send error: ${b}`);
+        pushLog(`Ошибка отправки: ${b}`);
       }
       break;
     case "incoming_message": {
       const incomingMessage = parseChatMessage(message.fields);
       if (!incomingMessage) {
-        pushLog("Incoming message parse error");
+        pushLog("Ошибка разбора входящего сообщения");
         break;
       }
 
@@ -1994,7 +1994,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
     case "history_message": {
       const historyMessage = parseChatMessage(message.fields);
       if (!historyMessage) {
-        pushLog("History message parse error");
+        pushLog("Ошибка разбора сообщения из истории");
         break;
       }
 
@@ -2009,13 +2009,13 @@ async function handleProtocolMessage(message: ProtocolMessage) {
     }
     case "delete_message_result":
       if (a !== "ok") {
-        pushLog(`Delete message error: ${b}`);
+        pushLog(`Ошибка удаления сообщения: ${b}`);
       }
       break;
     case "message_deleted": {
       const deletedMessage = parseChatMessage(message.fields);
       if (!deletedMessage) {
-        pushLog("Deleted message parse error");
+        pushLog("Ошибка разбора удаленного сообщения");
         break;
       }
 
@@ -2035,7 +2035,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
     case "history_result": {
       const resultPeer = message.fields[2] ?? "";
       const resultMode = message.fields[3] === "older" ? "older" : "latest";
-      pushLog(`History ${a}: ${b}`);
+      pushLog(`История ${a}: ${b}`);
       if (resultPeer) {
         const loadedCount = historyBatchCountByPeer[resultPeer] ?? 0;
         if (resultMode === "older") {
@@ -2117,7 +2117,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
           fetchChats();
         }
       }
-      pushLog(`Chats ${a}: ${b}`);
+      pushLog(`Чаты ${a}: ${b}`);
       break;
     case "user_search_item":
       if (a !== pendingSearchQuery.value) {
@@ -2135,7 +2135,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       ui.searchInFlight = false;
       ui.createGroupSearchInFlight = false;
       ui.groupAddSearchInFlight = false;
-      pushLog(`User search ${a}: ${b}`);
+      pushLog(`Поиск пользователей ${a}: ${b}`);
       break;
     case "create_chat_result":
       if (a === "ok") {
@@ -2145,7 +2145,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
           selectPeer(c);
         }
       } else {
-        pushLog(`Create chat error: ${b}`);
+        pushLog(`Ошибка создания чата: ${b}`);
       }
       break;
     case "create_group_result":
@@ -2156,7 +2156,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
           selectPeer(b);
         }
       } else {
-        pushLog(`Create group error: ${b}`);
+        pushLog(`Ошибка создания группы: ${b}`);
       }
       break;
     case "delete_chat_result":
@@ -2168,7 +2168,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
           ui.replyTarget = null;
         }
       } else {
-        pushLog(`Delete chat error: ${b}`);
+        pushLog(`Ошибка удаления чата: ${b}`);
       }
       break;
     case "mark_read_result":
@@ -2179,7 +2179,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
           sortChats();
         }
       } else {
-        pushLog("Mark read failed");
+        pushLog("Не удалось отметить сообщения прочитанными");
       }
       break;
     case "group_member_item":
@@ -2194,7 +2194,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         pendingProfilesBatch.delete(message.fields[1] ?? "");
       } else {
         ui.profileModalLoading = false;
-        pushLog(`Profile error: ${b}`);
+        pushLog(`Ошибка профиля: ${b}`);
       }
       break;
     case "update_profile_result":
@@ -2203,7 +2203,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         ui.profileModalOpen = false;
         session.profileMenuOpen = false;
       } else {
-        pushLog(`Update profile error: ${b}`);
+        pushLog(`Ошибка обновления профиля: ${b}`);
       }
       break;
     case "profile_item":
@@ -2212,7 +2212,7 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       break;
     case "profiles_result":
       if (a !== "ok") {
-        pushLog(`Profiles error: ${b}`);
+        pushLog(`Ошибка профилей: ${b}`);
       }
       pendingProfilesBatch.clear();
       break;
@@ -2224,11 +2224,11 @@ async function handleProtocolMessage(message: ProtocolMessage) {
         ui.groupSettingsAdminUsername = d;
         ui.groupSettingsCanManage = e === "1";
       } else {
-        pushLog(`Group info error: ${b}`);
+        pushLog(`Ошибка информации о группе: ${b}`);
       }
       break;
     case "group_update_result":
-      pushLog(`Group update ${a}: ${b}`);
+      pushLog(`Обновление группы ${a}: ${b}`);
       if (a === "ok") {
         fetchChats();
         if (ui.showGroupSettings && c) {
@@ -2244,11 +2244,11 @@ async function handleProtocolMessage(message: ProtocolMessage) {
       if (session.selectedPeer === removedChatId) {
         session.selectedPeer = "";
       }
-      pushLog(b || "Chat removed");
+      pushLog(b || "Чат удален");
       break;
     }
     default:
-      pushLog(`Unhandled command: ${message.command}`);
+      pushLog(`Необработанная команда: ${message.command}`);
       break;
   }
 }
@@ -2300,17 +2300,17 @@ watch(
           <small>@{{ session.currentUser }}</small>
         </div>
         <div class="profile-menu-actions">
-          <button class="small" @click="openOwnProfileEditor">Edit profile</button>
-          <button class="danger small signout-btn" @click="signOut">Sign out</button>
+          <button class="small" @click="openOwnProfileEditor">Профиль</button>
+          <button class="danger small signout-btn" @click="signOut">Выйти</button>
         </div>
       </div>
 
       <section class="panel chats-panel">
         <div class="panel-row">
-          <h2>Chats</h2>
-          <button class="small" @click="openAddChat" :disabled="!session.loggedIn">New</button>
+          <h2>Чаты</h2>
+          <button class="small" @click="openAddChat" :disabled="!session.loggedIn">Новый</button>
         </div>
-        <input v-model="ui.chatFilter" placeholder="Search chats" />
+        <input v-model="ui.chatFilter" placeholder="Поиск чатов" />
         <div class="chat-list-shell">
           <div class="chat-list">
             <div
@@ -2320,6 +2320,13 @@ watch(
               :class="{ active: session.selectedPeer === chat.peerId }"
               @click="selectPeer(chat.peerId)"
             >
+              <div
+                class="chat-avatar"
+                :class="{ 'group-chat-avatar': chat.kind === 'group' }"
+                :style="chat.kind === 'dm' ? { background: getProfileAvatarColor(chat.peerId) } : undefined"
+              >
+                {{ chat.kind === "dm" ? getProfileInitials(chat.peerId) : "ГР" }}
+              </div>
               <div class="chat-row-main">
                 <strong>{{ chatDisplayName(chat) }}</strong>
                 <span class="preview">
@@ -2328,17 +2335,18 @@ watch(
               </div>
               <div class="chat-row-actions">
                 <span v-if="chat.unreadCount > 0 && session.selectedPeer !== chat.peerId" class="unread-dot"></span>
-                <button v-if="chat.kind === 'dm'" class="chat-delete" @click.stop="deleteChat(chat.peerId)">x</button>
+                <button v-if="chat.kind === 'dm'" class="chat-delete" @click.stop="deleteChat(chat.peerId)">×</button>
               </div>
             </div>
           </div>
           <div v-if="showAiChatRow" class="ai-chat-block">
-            <div class="ai-chat-block-title">Assistant</div>
+            <div class="ai-chat-block-title">Ассистент</div>
             <div
               class="chat-row ai-chat-row"
               :class="{ active: session.selectedPeer === AI_CHAT_ID }"
               @click="selectPeer(AI_CHAT_ID)"
             >
+              <div class="chat-avatar ai-chat-avatar">AI</div>
               <div class="chat-row-main">
                 <strong>{{ AI_CHAT_NAME }}</strong>
                 <span class="preview">{{ aiPreviewText() }}</span>
@@ -2359,9 +2367,9 @@ watch(
           <p>
             {{
               isAiChatSelected
-                ? "Local assistant for analysis, summaries, translations and reply drafting"
+                ? "AI-помощник для анализа, пересказов, переводов и черновиков ответов"
                 : session.selectedPeer
-                ? (session.loggedIn ? `Signed in as ${session.currentUser}` : "Not signed in")
+                ? (selectedChat?.kind === "dm" ? `@${selectedChat.peerId}` : "Групповой чат")
                 : "Выберите чат слева"
             }}
           </p>
@@ -2375,22 +2383,22 @@ watch(
             <span class="presence-dot"></span>
             <span>{{ selectedDirectPresenceText }}</span>
           </div>
-          <button v-if="isAiChatSelected" class="small" @click="clearAiChat">Clear</button>
-          <button v-if="canOpenDirectProfile && selectedChat" class="small" @click="openUserProfile(selectedChat.peerId)">Profile</button>
-          <button v-if="canOpenGroupSettings" class="small" @click="openGroupSettings">People</button>
+          <button v-if="isAiChatSelected" class="small" @click="clearAiChat">Очистить</button>
+          <button v-if="canOpenDirectProfile && selectedChat" class="small" @click="openUserProfile(selectedChat.peerId)">Профиль</button>
+          <button v-if="canOpenGroupSettings" class="small" @click="openGroupSettings">Участники</button>
         </div>
       </header>
 
       <section ref="messagesViewport" class="messages" @scroll="onMessagesScroll">
         <div v-if="session.selectedPeer && !isAiChatSelected && loadingOlderByPeer[session.selectedPeer]" class="history-loading">
-          Loading older messages...
+          Загружаем старые сообщения...
         </div>
         <div v-if="!session.selectedPeer" class="empty-chat">
           <p>Выберите чат в списке слева, чтобы увидеть переписку.</p>
         </div>
         <template v-else-if="isAiChatSelected">
           <div v-if="currentAiMessages.length === 0" class="empty-chat">
-            <p>Open NexTalk AI and ask a question, or use Ask AI on any message.</p>
+            <p>Откройте NexTalk AI и задайте вопрос или используйте «Спросить AI» у любого сообщения.</p>
           </div>
           <template v-for="message in currentAiMessages" :key="message.id">
             <article
@@ -2414,7 +2422,7 @@ watch(
                   <small>{{ formatServerTime(message.createdAt) }}</small>
                 </div>
                 <div v-if="message.attachment" class="ai-attachment-card">
-                  <span class="ai-attachment-title">Forwarded message</span>
+                  <span class="ai-attachment-title">Пересланное сообщение</span>
                   <strong>{{ getProfileDisplayName(message.attachment.sender) }}</strong>
                   <span>{{ excerpt(message.attachment.text, 220) }}</span>
                 </div>
@@ -2444,7 +2452,7 @@ watch(
                 type="button"
                 @click="openForwardPreview(message)"
               >
-                <strong>Forwarded from {{ message.forwardFromSender ? getProfileDisplayName(message.forwardFromSender) : "Unknown" }}</strong>
+                <strong>Переслано от {{ message.forwardFromSender ? getProfileDisplayName(message.forwardFromSender) : "Неизвестно" }}</strong>
                 <span>{{ excerpt(message.forwardFromText || message.text) }}</span>
               </button>
               <button
@@ -2453,8 +2461,8 @@ watch(
                 type="button"
                 @click="jumpToMessage(message.replyToMessageId)"
               >
-                <strong>{{ message.replyToSender ? getProfileDisplayName(message.replyToSender) : "Message" }}</strong>
-                <span>{{ excerpt(message.replyToText || "Deleted message") }}</span>
+                <strong>{{ message.replyToSender ? getProfileDisplayName(message.replyToSender) : "Сообщение" }}</strong>
+                <span>{{ excerpt(message.replyToText || "Удаленное сообщение") }}</span>
               </button>
               <p v-if="displayedMessageText(message)" :class="{ 'deleted-copy': isMessageDeleted(message) }">
                 {{ displayedMessageText(message) }}
@@ -2468,16 +2476,16 @@ watch(
           class="message-menu"
           :style="{ left: `${ui.contextMenuX}px`, top: `${ui.contextMenuY}px` }"
         >
-          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginReply">Reply</button>
-          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginForward">Forward</button>
-          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginAiReply">AI Reply</button>
-          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginAskAi">Ask AI</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginReply">Ответить</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginForward">Переслать</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginAiReply">AI-ответ</button>
+          <button v-if="activeContextMessage && !isMessageDeleted(activeContextMessage)" class="message-menu-item" @click.stop="beginAskAi">Спросить AI</button>
           <button
             v-if="activeContextMessage && canDeleteMessage(activeContextMessage)"
             class="message-menu-item danger-text"
             @click.stop="requestDeleteMessage"
           >
-            Delete
+            Удалить
           </button>
         </div>
       </section>
@@ -2489,15 +2497,15 @@ watch(
               <strong>{{ getProfileDisplayName(ui.replyTarget.sender) }}</strong>
               <span>{{ excerpt(ui.replyTarget.text) }}</span>
             </div>
-            <button class="reply-cancel" @click="cancelReply">x</button>
+            <button class="reply-cancel" @click="cancelReply">×</button>
           </div>
           <div v-if="isAiChatSelected && ui.aiPendingAttachment" class="reply-draft ai-pending-draft">
             <div class="reply-draft-copy">
-              <small class="ai-attachment-title">Forwarded message</small>
+              <small class="ai-attachment-title">Пересланное сообщение</small>
               <strong>{{ getProfileDisplayName(ui.aiPendingAttachment.sender) }}</strong>
               <span>{{ excerpt(ui.aiPendingAttachment.text, 220) }}</span>
             </div>
-            <button class="reply-cancel" @click="cancelAiAttachment">x</button>
+            <button class="reply-cancel" @click="cancelAiAttachment">×</button>
           </div>
           <div class="composer-row">
             <input
@@ -2505,10 +2513,10 @@ watch(
               type="text"
               :placeholder="
                 isAiChatSelected && ui.aiPendingAttachment
-                  ? 'What should AI do with this message?'
+                  ? 'Что AI должен сделать с этим сообщением?'
                   : isAiChatSelected
-                    ? 'Ask NexTalk AI anything'
-                    : 'Write a message'
+                    ? 'Спросите NexTalk AI о чем угодно'
+                    : 'Напишите сообщение'
               "
               :disabled="(!session.selectedPeer || !session.loggedIn) || ui.aiSending"
               @keydown.enter.prevent="sendMessage"
@@ -2542,14 +2550,14 @@ watch(
                     {{ preset }}
                   </button>
                   <button class="ai-rewrite-item ai-rewrite-custom-toggle" type="button" :disabled="ui.aiRewriteLoading" @click="openCustomAiRewrite">
-                    Custom...
+                    Свой вариант...
                   </button>
                 </div>
                 <div v-if="ui.aiRewriteCustomOpen" class="ai-rewrite-custom">
                   <input
                     v-model="ui.aiRewriteCustomInstruction"
                     type="text"
-                    placeholder="Describe how to rewrite it"
+                    placeholder="Опишите, как переписать"
                     :disabled="ui.aiRewriteLoading"
                     @keydown.enter.prevent="submitCustomAiRewrite"
                   />
@@ -2559,7 +2567,7 @@ watch(
                     :disabled="ui.aiRewriteLoading || !ui.aiRewriteCustomInstruction.trim()"
                     @click="submitCustomAiRewrite"
                   >
-                    Apply
+                    Применить
                   </button>
                 </div>
                 <p v-if="ui.aiRewriteError" class="ai-rewrite-error">{{ ui.aiRewriteError }}</p>
@@ -2570,11 +2578,11 @@ watch(
               @click="sendMessage"
               :disabled="
                 !session.selectedPeer ||
-                (!ui.messageDraft.trim() && !(isAiChatSelected && !ui.aiPendingAttachment)) ||
+                !ui.messageDraft.trim() ||
                 ui.aiSending
               "
             >
-              {{ isAiChatSelected && ui.aiSending ? "Thinking..." : "Send" }}
+              {{ isAiChatSelected && ui.aiSending ? "Думаю..." : "Отправить" }}
             </button>
           </div>
         </div>
@@ -2582,7 +2590,7 @@ watch(
     </main>
 
     <section class="log-panel">
-      <h3>Session log</h3>
+      <h3>Журнал сессии</h3>
       <div ref="logsViewport" class="logs" @scroll="onLogsScroll">
         <p v-for="(line, idx) in ui.logs" :key="idx">{{ line }}</p>
       </div>
@@ -2590,25 +2598,25 @@ watch(
 
     <section v-if="ui.showNewChatChoice" class="modal-wrap">
       <div class="modal">
-        <button class="modal-close" type="button" @click="closeAddChat" aria-label="Close">x</button>
-        <h3>New chat</h3>
-        <p>Choose what you want to create.</p>
+        <button class="modal-close" type="button" @click="closeAddChat" aria-label="Закрыть">×</button>
+        <h3>Новый чат</h3>
+        <p>Выберите, что нужно создать.</p>
         <div class="welcome-actions">
-          <button class="primary" @click="openDirectChatCreator">Direct chat</button>
-          <button class="secondary" @click="openGroupChatCreator">Group chat</button>
+          <button class="primary" @click="openDirectChatCreator">Личный чат</button>
+          <button class="secondary" @click="openGroupChatCreator">Групповой чат</button>
         </div>
       </div>
     </section>
 
     <section v-if="ui.showAddChat" class="modal-wrap">
       <div class="modal">
-        <button class="modal-close" type="button" @click="closeAddChat" aria-label="Close">x</button>
-        <h3>Create Chat</h3>
-        <p>Find users by username and create a private chat.</p>
+        <button class="modal-close" type="button" @click="closeAddChat" aria-label="Закрыть">×</button>
+        <h3>Создать чат</h3>
+        <p>Найдите пользователя по логину и начните личную переписку.</p>
         <div class="modal-search">
-          <input v-model="ui.searchQuery" type="text" placeholder="username" @keydown.enter.prevent="runUserSearch" />
+          <input v-model="ui.searchQuery" type="text" placeholder="логин" @keydown.enter.prevent="runUserSearch" />
           <button class="small" @click="runUserSearch" :disabled="ui.searchInFlight">
-            {{ ui.searchInFlight ? "Searching..." : "Search" }}
+            {{ ui.searchInFlight ? "Ищем..." : "Найти" }}
           </button>
         </div>
         <div class="search-results">
@@ -2621,23 +2629,23 @@ watch(
             <strong>{{ item.username }}</strong>
             <small>#{{ item.id }}</small>
           </button>
-          <p v-if="!ui.searchInFlight && searchResults.length === 0">No results</p>
+          <p v-if="!ui.searchInFlight && searchResults.length === 0">Ничего не найдено</p>
         </div>
       </div>
     </section>
 
     <section v-if="ui.showCreateGroup" class="modal-wrap">
       <div class="modal">
-        <button class="modal-close" type="button" @click="closeCreateGroup" aria-label="Close">x</button>
-        <h3>Create Group</h3>
-        <p>Select members and choose an administrator.</p>
-        <label>Group name</label>
-        <input v-model="ui.createGroupName" type="text" placeholder="Group name" />
-        <label>Find users</label>
+        <button class="modal-close" type="button" @click="closeCreateGroup" aria-label="Закрыть">×</button>
+        <h3>Создать группу</h3>
+        <p>Выберите участников и назначьте администратора.</p>
+        <label>Название группы</label>
+        <input v-model="ui.createGroupName" type="text" placeholder="Название группы" />
+        <label>Найти пользователей</label>
         <div class="modal-search">
-          <input v-model="ui.createGroupSearchQuery" type="text" placeholder="username" @keydown.enter.prevent="runCreateGroupSearch" />
+          <input v-model="ui.createGroupSearchQuery" type="text" placeholder="логин" @keydown.enter.prevent="runCreateGroupSearch" />
           <button class="small" @click="runCreateGroupSearch" :disabled="ui.createGroupSearchInFlight">
-            {{ ui.createGroupSearchInFlight ? "Searching..." : "Search" }}
+            {{ ui.createGroupSearchInFlight ? "Ищем..." : "Найти" }}
           </button>
         </div>
         <div class="search-results">
@@ -2648,10 +2656,10 @@ watch(
             @click="toggleCreateGroupUser(item)"
           >
             <strong>{{ item.username }}</strong>
-            <small>{{ ui.createGroupSelectedUsers.some((user) => user.username === item.username) ? "selected" : "tap to add" }}</small>
+            <small>{{ ui.createGroupSelectedUsers.some((user) => user.username === item.username) ? "выбран" : "добавить" }}</small>
           </button>
         </div>
-        <label>Administrator</label>
+        <label>Администратор</label>
         <select v-model="ui.createGroupAdmin">
           <option :value="session.currentUser">{{ session.currentUser }}</option>
           <option v-for="item in ui.createGroupSelectedUsers" :key="`admin-${item.username}`" :value="item.username">
@@ -2659,22 +2667,22 @@ watch(
           </option>
         </select>
         <div class="selected-chips">
-          <span class="member-chip self">{{ session.currentUser }} (you)</span>
+          <span class="member-chip self">{{ session.currentUser }} (вы)</span>
           <span v-for="item in ui.createGroupSelectedUsers" :key="`chip-${item.username}`" class="member-chip">
             {{ item.username }}
           </span>
         </div>
         <div class="modal-actions">
-          <button class="primary" @click="createGroup" :disabled="!ui.createGroupName.trim()">Create</button>
+          <button class="primary" @click="createGroup" :disabled="!ui.createGroupName.trim()">Создать</button>
         </div>
       </div>
     </section>
 
     <section v-if="ui.showForwardPicker && ui.forwardTarget" class="modal-wrap" @click.self="cancelForward">
       <div class="modal forward-modal">
-        <button class="modal-close" type="button" @click="cancelForward" aria-label="Close">x</button>
-        <h3>Forward message</h3>
-        <p>Choose who should receive this message and add an optional comment.</p>
+        <button class="modal-close" type="button" @click="cancelForward" aria-label="Закрыть">×</button>
+        <h3>Переслать сообщение</h3>
+        <p>Выберите получателя и при необходимости добавьте комментарий.</p>
         <div class="forward-preview-card">
           <strong>{{ getProfileDisplayName(ui.forwardTarget.sender) }}</strong>
           <span>{{ excerpt(ui.forwardTarget.text, 160) }}</span>
@@ -2691,76 +2699,76 @@ watch(
             <strong>{{ chatDisplayName(chat) }}</strong>
             <span>{{ chatPreview(chat) }}</span>
           </button>
-          <p v-if="forwardableChats.length === 0">Create another chat first, then forward messages there.</p>
+          <p v-if="forwardableChats.length === 0">Сначала создайте другой чат, чтобы пересылать туда сообщения.</p>
         </div>
         <div class="forward-compose">
-          <label>Add a comment</label>
+          <label>Комментарий</label>
           <textarea
             v-model="ui.forwardDraft"
             rows="3"
-            placeholder="Optional text"
+            placeholder="Необязательный текст"
           ></textarea>
         </div>
         <div class="modal-actions">
-          <button class="primary" @click="submitForward" :disabled="!ui.forwardRecipient">Send</button>
+          <button class="primary" @click="submitForward" :disabled="!ui.forwardRecipient">Отправить</button>
         </div>
       </div>
     </section>
 
     <section v-if="ui.aiReplyModalOpen && ui.aiReplySourceMessage" class="modal-wrap" @click.self="closeAiReplyModal">
       <div class="modal ai-reply-modal">
-        <button class="modal-close" type="button" @click="closeAiReplyModal" aria-label="Close">x</button>
-        <h3>AI Reply</h3>
-        <p>Generate a reply draft for the current chat without opening the full AI conversation.</p>
+        <button class="modal-close" type="button" @click="closeAiReplyModal" aria-label="Закрыть">×</button>
+        <h3>AI-ответ</h3>
+        <p>Сгенерируйте черновик ответа для текущего чата, не открывая отдельный диалог с AI.</p>
         <div class="forward-preview-card">
-          <span class="ai-attachment-title">Source message</span>
+          <span class="ai-attachment-title">Исходное сообщение</span>
           <strong>{{ getProfileDisplayName(buildAiAttachment(ui.aiReplySourceMessage).sender) }}</strong>
           <span>{{ excerpt(buildAiAttachment(ui.aiReplySourceMessage).text, 220) }}</span>
         </div>
         <div class="forward-compose">
-          <label>Instruction</label>
+          <label>Инструкция</label>
           <textarea
             v-model="ui.aiReplyInstruction"
             rows="3"
             :disabled="ui.aiReplyLoading"
-            placeholder="Describe the tone or purpose of the reply"
+            placeholder="Опишите тон или цель ответа"
           ></textarea>
         </div>
         <div class="modal-actions ai-reply-top-actions">
           <button class="primary ai-reply-generate-btn ai-accent-btn" @click="generateAiReply" :disabled="ui.aiReplyLoading">
-            {{ ui.aiReplyLoading ? "Generating..." : "Generate" }}
+            {{ ui.aiReplyLoading ? "Генерируем..." : "Сгенерировать" }}
           </button>
         </div>
         <div class="ai-reply-suggestion">
-          <span class="ai-attachment-title">Suggested reply</span>
-          <p>{{ ui.aiReplySuggestion || "Generated reply will appear here." }}</p>
+          <span class="ai-attachment-title">Предложенный ответ</span>
+          <p>{{ ui.aiReplySuggestion || "Здесь появится сгенерированный ответ." }}</p>
         </div>
         <div class="modal-actions">
-          <button class="small" @click="insertAiReplyToChat" :disabled="!ui.aiReplySuggestion.trim()">Insert to chat</button>
+          <button class="small" @click="insertAiReplyToChat" :disabled="!ui.aiReplySuggestion.trim()">Вставить в чат</button>
         </div>
       </div>
     </section>
 
     <section v-if="ui.forwardPreviewMessage" class="modal-wrap" @click.self="closeForwardPreview">
       <div class="modal forward-view-modal">
-        <h3>Forwarded message</h3>
-        <p>This is the original content preserved inside the forwarded message.</p>
+        <h3>Пересланное сообщение</h3>
+        <p>Это исходный текст, сохраненный внутри пересланного сообщения.</p>
         <div class="forward-view-card">
-          <strong>{{ ui.forwardPreviewMessage.forwardFromSender ? getProfileDisplayName(ui.forwardPreviewMessage.forwardFromSender) : "Unknown" }}</strong>
+          <strong>{{ ui.forwardPreviewMessage.forwardFromSender ? getProfileDisplayName(ui.forwardPreviewMessage.forwardFromSender) : "Неизвестно" }}</strong>
           <span>{{ ui.forwardPreviewMessage.forwardFromText || ui.forwardPreviewMessage.text }}</span>
         </div>
         <div class="modal-actions">
-          <button class="small" @click="closeForwardPreview">Close</button>
+          <button class="small" @click="closeForwardPreview">Закрыть</button>
         </div>
       </div>
     </section>
 
     <section v-if="ui.showGroupSettings" class="modal-wrap" @click.self="closeGroupSettings">
       <div class="modal group-settings-modal">
-        <button class="modal-close" type="button" @click="closeGroupSettings" aria-label="Close">x</button>
-        <h3>{{ ui.groupSettingsCanManage ? "Group settings" : "Group members" }}</h3>
+        <button class="modal-close" type="button" @click="closeGroupSettings" aria-label="Закрыть">×</button>
+        <h3>{{ ui.groupSettingsCanManage ? "Настройки группы" : "Участники группы" }}</h3>
         <p>{{ ui.groupSettingsTitle }}</p>
-        <div v-if="ui.groupSettingsLoading" class="search-results"><p>Loading...</p></div>
+        <div v-if="ui.groupSettingsLoading" class="search-results"><p>Загрузка...</p></div>
         <template v-else>
           <div class="search-results">
             <div v-for="member in ui.groupSettingsMembers" :key="`member-${member.username}`" class="group-member-row">
@@ -2770,7 +2778,7 @@ watch(
                 </span>
                 <span class="member-copy">
                   <strong>{{ getProfileDisplayName(member.username) }}</strong>
-                  <small>@{{ member.username }} · {{ member.isAdmin ? "admin" : "member" }}</small>
+                  <small>@{{ member.username }} · {{ member.isAdmin ? "администратор" : "участник" }}</small>
                 </span>
               </button>
               <div class="group-member-actions">
@@ -2779,24 +2787,24 @@ watch(
                   class="small"
                   @click="removeUserFromGroup(member.username)"
                 >
-                  Remove
+                  Удалить
                 </button>
                 <button
                   v-if="ui.groupSettingsCanManage && !member.isAdmin"
                   class="small"
                   @click="transferAdmin(member.username)"
                 >
-                  Make admin
+                  Назначить
                 </button>
               </div>
             </div>
           </div>
           <template v-if="ui.groupSettingsCanManage">
-            <label class="group-add-label">Add members</label>
+            <label class="group-add-label">Добавить участников</label>
             <div class="modal-search">
-              <input v-model="ui.groupAddSearchQuery" type="text" placeholder="username" @keydown.enter.prevent="runGroupAddSearch" />
+              <input v-model="ui.groupAddSearchQuery" type="text" placeholder="логин" @keydown.enter.prevent="runGroupAddSearch" />
               <button class="small" @click="runGroupAddSearch" :disabled="ui.groupAddSearchInFlight">
-                {{ ui.groupAddSearchInFlight ? "Searching..." : "Search" }}
+                {{ ui.groupAddSearchInFlight ? "Ищем..." : "Найти" }}
               </button>
             </div>
             <div class="search-results">
@@ -2807,15 +2815,15 @@ watch(
                 @click="addUserToGroup(item)"
               >
                 <strong>{{ item.username }}</strong>
-                <small>Add</small>
+                <small>Добавить</small>
               </button>
             </div>
             <div class="modal-actions group-settings-actions">
-              <button class="danger small" @click="deleteCurrentGroup">Delete group</button>
+              <button class="danger small" @click="deleteCurrentGroup">Удалить группу</button>
             </div>
           </template>
           <div v-else class="modal-actions">
-            <button class="secondary" @click="leaveCurrentGroup">Leave group</button>
+            <button class="secondary" @click="leaveCurrentGroup">Выйти из группы</button>
           </div>
         </template>
       </div>
@@ -2823,53 +2831,53 @@ watch(
 
     <section v-if="ui.profileModalOpen" class="modal-wrap" @click.self="closeProfileModal">
       <div class="modal profile-modal">
-        <button class="modal-close" type="button" @click="closeProfileModal" aria-label="Close">x</button>
+        <button class="modal-close" type="button" @click="closeProfileModal" aria-label="Закрыть">×</button>
         <div class="profile-modal-head">
           <div class="avatar profile-avatar" :style="{ background: ui.profileForm.avatarColor }">
             {{ computeInitials(ui.profileForm.displayName, ui.profileForm.username) }}
           </div>
           <div>
-            <h3>{{ ui.profileViewMode === "edit" ? "Edit profile" : ui.profileForm.displayName }}</h3>
+            <h3>{{ ui.profileViewMode === "edit" ? "Редактировать профиль" : ui.profileForm.displayName }}</h3>
             <p>@{{ ui.profileForm.username }}</p>
           </div>
         </div>
 
-        <div v-if="ui.profileModalLoading" class="profile-loading">Loading profile...</div>
+        <div v-if="ui.profileModalLoading" class="profile-loading">Загружаем профиль...</div>
 
         <template v-else-if="ui.profileViewMode === 'edit'">
           <div class="profile-form">
-            <label>Username</label>
+            <label>Логин</label>
             <input :value="ui.profileForm.username" type="text" readonly />
-            <label>Display name</label>
+            <label>Отображаемое имя</label>
             <input v-model="ui.profileForm.displayName" type="text" maxlength="40" />
-            <label>Bio</label>
-            <textarea v-model="ui.profileForm.bio" rows="4" maxlength="160" placeholder="A few words about you"></textarea>
-            <label>Avatar color</label>
+            <label>О себе</label>
+            <textarea v-model="ui.profileForm.bio" rows="4" maxlength="160" placeholder="Пара слов о себе"></textarea>
+            <label>Цвет аватара</label>
             <div class="color-row">
               <input v-model="ui.profileForm.avatarColor" type="color" />
               <span>{{ ui.profileForm.avatarColor }}</span>
             </div>
             <div class="profile-facts">
-              <span>Created: {{ ui.profileForm.createdAt ? formatServerTime(ui.profileForm.createdAt) : "unknown" }}</span>
-              <span>Status: {{ formatProfileFormStatus() }}</span>
+              <span>Создан: {{ ui.profileForm.createdAt ? formatServerTime(ui.profileForm.createdAt) : "неизвестно" }}</span>
+              <span>Статус: {{ formatProfileFormStatus() }}</span>
             </div>
           </div>
           <div class="modal-actions">
-            <button class="small" @click="closeProfileModal">Cancel</button>
-            <button class="primary profile-save-btn" @click="saveOwnProfile" :disabled="!ui.profileForm.displayName.trim()">Save</button>
+            <button class="small" @click="closeProfileModal">Отмена</button>
+            <button class="primary profile-save-btn" @click="saveOwnProfile" :disabled="!ui.profileForm.displayName.trim()">Сохранить</button>
           </div>
         </template>
 
         <template v-else>
           <div class="profile-view">
-            <p class="profile-bio">{{ ui.profileForm.bio || "No bio yet." }}</p>
+            <p class="profile-bio">{{ ui.profileForm.bio || "Описание пока не заполнено." }}</p>
             <div class="profile-facts">
-              <span>Created: {{ ui.profileForm.createdAt ? formatServerTime(ui.profileForm.createdAt) : "unknown" }}</span>
-              <span>Status: {{ formatProfileFormStatus() }}</span>
+              <span>Создан: {{ ui.profileForm.createdAt ? formatServerTime(ui.profileForm.createdAt) : "неизвестно" }}</span>
+              <span>Статус: {{ formatProfileFormStatus() }}</span>
             </div>
           </div>
           <div class="modal-actions">
-            <button class="small" @click="closeProfileModal">Close</button>
+            <button class="small" @click="closeProfileModal">Закрыть</button>
           </div>
         </template>
       </div>
@@ -2878,30 +2886,30 @@ watch(
     <section v-if="auth.visible" class="modal-wrap auth-modal-wrap">
       <div class="modal auth-modal">
         <h3>NexTalk</h3>
-        <p v-if="auth.mode === 'choice'">Choose how you want to continue.</p>
-        <p v-else>{{ auth.mode === "login" ? "Sign in to your account" : "Create a new account" }}</p>
+        <p v-if="auth.mode === 'choice'">Выберите, как продолжить.</p>
+        <p v-else>{{ auth.mode === "login" ? "Войдите в аккаунт" : "Создайте новый аккаунт" }}</p>
 
         <div v-if="auth.mode === 'choice'" class="welcome-actions">
-          <button class="primary" @click="auth.mode = 'login'; auth.error = ''">Sign in</button>
-          <button class="secondary" @click="auth.mode = 'register'; auth.error = ''">Create account</button>
+          <button class="primary" @click="auth.mode = 'login'; auth.error = ''">Войти</button>
+          <button class="secondary" @click="auth.mode = 'register'; auth.error = ''">Создать аккаунт</button>
         </div>
 
         <div v-else class="auth-form">
-          <label>Host</label>
+          <label>Хост</label>
           <input v-model="form.host" type="text" />
-          <label>Port</label>
+          <label>Порт</label>
           <input v-model.number="form.port" type="number" min="1" max="65535" />
-          <label>Username</label>
+          <label>Логин</label>
           <input v-model="form.username" type="text" />
-          <label>Password</label>
+          <label>Пароль</label>
           <input v-model="form.password" type="password" />
 
           <p v-if="auth.error" class="auth-error">{{ auth.error }}</p>
 
           <div class="auth-actions">
-            <button class="small" @click="auth.mode = 'choice'; auth.error = ''" :disabled="auth.inFlight">Back</button>
+            <button class="small" @click="auth.mode = 'choice'; auth.error = ''" :disabled="auth.inFlight">Назад</button>
             <button class="primary" @click="beginAuth(auth.mode)" :disabled="auth.inFlight">
-              {{ auth.inFlight ? "Please wait..." : auth.mode === "login" ? "Sign in" : "Create & sign in" }}
+              {{ auth.inFlight ? "Подождите..." : auth.mode === "login" ? "Войти" : "Создать и войти" }}
             </button>
           </div>
         </div>
