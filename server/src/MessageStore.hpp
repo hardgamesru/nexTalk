@@ -90,6 +90,9 @@ public:
     bool loadPasswordSalt(const std::string& username,
                           std::string& passwordSalt,
                           std::string& error);
+    bool loadPasswordHash(const std::string& username,
+                          std::string& passwordHash,
+                          std::string& error);
     bool userExists(const std::string& username, bool& exists, std::string& error);
     bool getUserProfile(const std::string& username,
                         UserProfile& profile,

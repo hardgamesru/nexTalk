@@ -307,6 +307,36 @@ bool MessageStore::loadPasswordSalt(const std::string& username,
     return true;
 }
 
+bool MessageStore::loadPasswordHash(const std::string& username,
+                                    std::string& passwordHash,
+                                    std::string& error) {
+    passwordHash.clear();
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    Statement statement(db_,
+                        "SELECT password_hash FROM users WHERE username = ?;",
+                        error);
+    if (!statement) {
+        return false;
+    }
+
+    sqlite3_bind_text(statement.get(), 1, username.c_str(), -1, SQLITE_TRANSIENT);
+
+    const int result = sqlite3_step(statement.get());
+    if (result == SQLITE_DONE) {
+        return true;
+    }
+
+    if (result != SQLITE_ROW) {
+        error = lastError(db_);
+        return false;
+    }
+
+    const auto* rawHash = sqlite3_column_text(statement.get(), 0);
+    passwordHash = rawHash ? reinterpret_cast<const char*>(rawHash) : "";
+    return true;
+}
+
 bool MessageStore::userExists(const std::string& username, bool& exists, std::string& error) {
     std::lock_guard<std::mutex> lock(mutex_);
     return userExistsLocked(username, exists, error);
@@ -2026,6 +2056,17 @@ bool MessageStore::createGroup(const std::string& creator,
     if (!creatorExists || !adminExists) {
         error = "unknown user";
         return false;
+    }
+
+    for (const auto& username : members) {
+        bool memberExists = false;
+        if (!userExistsLocked(username, memberExists, error)) {
+            return false;
+        }
+        if (!memberExists) {
+            error = "unknown user: " + username;
+            return false;
+        }
     }
 
     if (!executeLocked("BEGIN IMMEDIATE TRANSACTION;", error)) {

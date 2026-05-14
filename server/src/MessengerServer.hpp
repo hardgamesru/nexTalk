@@ -184,7 +184,7 @@ private:
     /**
      * Аккуратно закрывает TCP-сокет сессии.
      */
-    void closeSessionSocket(const std::shared_ptr<ClientSession>& session);
+    void closeSessionSocket(const std::shared_ptr<ClientSession>& session, bool releaseTls);
 
     /**
      * Пишет одну строку в лог-файл.
@@ -199,6 +199,10 @@ private:
     static std::string defaultAvatarColorForUsername(const std::string& username);
     static std::string generatePasswordSalt();
     static std::string passwordHash(const std::string& password, const std::string& salt);
+    static std::string legacyPasswordHash(const std::string& password, const std::string& salt);
+    static bool verifyPasswordHash(const std::string& password,
+                                   const std::string& salt,
+                                   const std::string& storedHash);
     static std::string currentTimestamp();
 
     int port_;

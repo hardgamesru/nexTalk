@@ -21,6 +21,7 @@
 #include <utility>
 
 #include <openssl/err.h>
+#include <openssl/evp.h>
 #include <openssl/ssl.h>
 
 namespace {
@@ -29,6 +30,7 @@ namespace {
     constexpr int kDefaultHistoryLimit = 20;
     constexpr int kMaxHistoryLimit = 100;
     constexpr int kMaxUserSearchResults = 20;
+    constexpr int kPasswordHashIterations = 200000;
     constexpr const char* kServerCertificatePath = "certs/server.crt";
     constexpr const char* kServerPrivateKeyPath = "certs/server.key";
 
@@ -160,6 +162,15 @@ namespace {
         char buffer[256] = {};
         ERR_error_string_n(errorCode, buffer, sizeof(buffer));
         return buffer;
+    }
+
+    std::string hexEncode(const unsigned char* data, std::size_t size) {
+        std::ostringstream out;
+        out << std::hex << std::setfill('0');
+        for (std::size_t i = 0; i < size; ++i) {
+            out << std::setw(2) << static_cast<int>(data[i]);
+        }
+        return out.str();
     }
 
     std::vector<std::string> buildStoredMessageFields(const StoredMessage& storedMessage,
@@ -431,8 +442,7 @@ void MessengerServer::stop() {
 
     for (const auto& session : sessions) {
         session->active = false;
-        sendToSession(session, {common::CommandType::Info, {"server is shutting down"}});
-        closeSessionSocket(session);
+        closeSessionSocket(session, false);
     }
 
     if (sslContext_) {
@@ -453,7 +463,7 @@ bool MessengerServer::sendToSession(const std::shared_ptr<ClientSession>& sessio
     // важно, когда разные клиентские потоки одновременно отправляют события
     // одному и тому же пользователю.
     std::lock_guard<std::mutex> lock(session->writeMutex);
-    if (session->socket < 0 || !session->ssl) {
+    if (!session->active || session->socket < 0 || !session->ssl) {
         return false;
     }
 
@@ -627,21 +637,18 @@ void MessengerServer::handleLogin(const std::shared_ptr<ClientSession>& session,
         return;
     }
 
-    if (salt.empty()) {
-        sendToSession(session, {common::CommandType::LoginResult, {"error", "unknown user"}});
-        return;
-    }
-
-    bool authenticated = false;
-    if (!messageStore_.authenticateUser(username, passwordHash(password, salt), authenticated, storageError)) {
+    std::string storedHash;
+    if (!messageStore_.loadPasswordHash(username, storedHash, storageError)) {
         logEvent("user_login_storage_failed username=" + username +
                  " error=\"" + escapeLogField(storageError) + "\"");
         sendToSession(session, {common::CommandType::LoginResult, {"error", "storage error"}});
         return;
     }
 
+    const bool authenticated = !salt.empty() && !storedHash.empty() &&
+                               verifyPasswordHash(password, salt, storedHash);
     if (!authenticated) {
-        sendToSession(session, {common::CommandType::LoginResult, {"error", "invalid password"}});
+        sendToSession(session, {common::CommandType::LoginResult, {"error", "invalid username or password"}});
         logEvent("user_login_failed username=" + username + " peer=" + session->peer);
         return;
     }
@@ -685,6 +692,10 @@ void MessengerServer::handleRegister(const std::shared_ptr<ClientSession>& sessi
     const std::string username = message.fields[0];
     const std::string salt = generatePasswordSalt();
     const std::string hash = passwordHash(message.fields[1], salt);
+    if (hash.empty()) {
+        sendToSession(session, {common::CommandType::RegisterResult, {"error", "password hashing failed"}});
+        return;
+    }
 
     std::string storageError;
     if (!messageStore_.registerUser(username, salt, hash, storageError)) {
@@ -750,16 +761,22 @@ void MessengerServer::handleSendMessage(const std::shared_ptr<ClientSession>& se
 
         const std::vector<std::string> incomingFields = buildStoredMessageFields(storedMessage, targetChatId, groupName);
 
-        std::lock_guard<std::mutex> lock(clientsMutex_);
-        for (const auto& username : memberUsernames) {
-            if (username == session->username) {
-                continue;
+        std::vector<std::shared_ptr<ClientSession>> onlineMembers;
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex_);
+            for (const auto& username : memberUsernames) {
+                if (username == session->username) {
+                    continue;
+                }
+                const auto it = onlineUsers_.find(username);
+                if (it != onlineUsers_.end()) {
+                    onlineMembers.push_back(it->second);
+                }
             }
-            const auto it = onlineUsers_.find(username);
-            if (it != onlineUsers_.end()) {
-                sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
-                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
-            }
+        }
+        for (const auto& memberSession : onlineMembers) {
+            sendToSession(memberSession, {common::CommandType::IncomingMessage, incomingFields});
+            handleFetchChats(memberSession, {common::CommandType::FetchChats, {}});
         }
         handleFetchChats(session, {common::CommandType::FetchChats, {}});
         return;
@@ -975,16 +992,22 @@ void MessengerServer::handleForwardMessage(const std::shared_ptr<ClientSession>&
         std::vector<std::string> senderFields = {"ok"};
         senderFields.insert(senderFields.end(), fields.begin(), fields.end());
         sendToSession(session, {common::CommandType::SendMessageResult, senderFields});
-        std::lock_guard<std::mutex> lock(clientsMutex_);
-        for (const auto& username : memberUsernames) {
-            if (username == session->username) {
-                continue;
+        std::vector<std::shared_ptr<ClientSession>> onlineMembers;
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex_);
+            for (const auto& username : memberUsernames) {
+                if (username == session->username) {
+                    continue;
+                }
+                const auto it = onlineUsers_.find(username);
+                if (it != onlineUsers_.end()) {
+                    onlineMembers.push_back(it->second);
+                }
             }
-            const auto it = onlineUsers_.find(username);
-            if (it != onlineUsers_.end()) {
-                sendToSession(it->second, {common::CommandType::IncomingMessage, fields});
-                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
-            }
+        }
+        for (const auto& memberSession : onlineMembers) {
+            sendToSession(memberSession, {common::CommandType::IncomingMessage, fields});
+            handleFetchChats(memberSession, {common::CommandType::FetchChats, {}});
         }
         handleFetchChats(session, {common::CommandType::FetchChats, {}});
         return;
@@ -1310,12 +1333,18 @@ void MessengerServer::handleCreateGroup(const std::shared_ptr<ClientSession>& se
                                          storageError);
 
     sendToSession(session, {common::CommandType::CreateGroupResult, {"ok", makeGroupChatId(groupId), message.fields[0]}});
-    std::lock_guard<std::mutex> lock(clientsMutex_);
-    for (const auto& username : members) {
-        const auto it = onlineUsers_.find(username);
-        if (it != onlineUsers_.end()) {
-            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+    std::vector<std::shared_ptr<ClientSession>> onlineMembers;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& username : members) {
+            const auto it = onlineUsers_.find(username);
+            if (it != onlineUsers_.end()) {
+                onlineMembers.push_back(it->second);
+            }
         }
+    }
+    for (const auto& memberSession : onlineMembers) {
+        handleFetchChats(memberSession, {common::CommandType::FetchChats, {}});
     }
 }
 
@@ -1386,19 +1415,23 @@ void MessengerServer::handleAddGroupMembers(const std::shared_ptr<ClientSession>
                                              groupName,
                                              memberUsernames,
                                              storageError);
-        const std::vector<std::string> incomingFields = {
-            std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
-            groupName, systemMessage.text, "", "", "", "", "", ""
-        };
-        std::lock_guard<std::mutex> lock(clientsMutex_);
-        for (const auto& member : memberUsernames) {
-            const auto it = onlineUsers_.find(member);
-            if (it != onlineUsers_.end()) {
-                if (member != session->username) {
-                    sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
+        const std::vector<std::string> incomingFields =
+            buildStoredMessageFields(systemMessage, message.fields[0], groupName);
+        std::vector<std::shared_ptr<ClientSession>> onlineMembers;
+        {
+            std::lock_guard<std::mutex> lock(clientsMutex_);
+            for (const auto& member : memberUsernames) {
+                const auto it = onlineUsers_.find(member);
+                if (it != onlineUsers_.end()) {
+                    onlineMembers.push_back(it->second);
                 }
-                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
             }
+        }
+        for (const auto& memberSession : onlineMembers) {
+            if (memberSession != session) {
+                sendToSession(memberSession, {common::CommandType::IncomingMessage, incomingFields});
+            }
+            handleFetchChats(memberSession, {common::CommandType::FetchChats, {}});
         }
     }
 
@@ -1431,22 +1464,30 @@ void MessengerServer::handleRemoveGroupMember(const std::shared_ptr<ClientSessio
                                          groupName,
                                          memberUsernames,
                                          storageError);
-    const std::vector<std::string> incomingFields = {
-        std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
-        groupName, systemMessage.text, "", "", "", "", "", ""
-    };
-    std::lock_guard<std::mutex> lock(clientsMutex_);
-    for (const auto& member : memberUsernames) {
-        const auto it = onlineUsers_.find(member);
-        if (it != onlineUsers_.end()) {
-            sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
-            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+    const std::vector<std::string> incomingFields =
+        buildStoredMessageFields(systemMessage, message.fields[0], groupName);
+    std::vector<std::shared_ptr<ClientSession>> onlineMembers;
+    std::shared_ptr<ClientSession> removedSession;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& member : memberUsernames) {
+            const auto it = onlineUsers_.find(member);
+            if (it != onlineUsers_.end()) {
+                onlineMembers.push_back(it->second);
+            }
+        }
+        const auto removedIt = onlineUsers_.find(message.fields[1]);
+        if (removedIt != onlineUsers_.end()) {
+            removedSession = removedIt->second;
         }
     }
-    const auto removedIt = onlineUsers_.find(message.fields[1]);
-    if (removedIt != onlineUsers_.end()) {
-        sendToSession(removedIt->second, {common::CommandType::ChatRemoved, {message.fields[0], "removed from group"}});
-        handleFetchChats(removedIt->second, {common::CommandType::FetchChats, {}});
+    for (const auto& memberSession : onlineMembers) {
+        sendToSession(memberSession, {common::CommandType::IncomingMessage, incomingFields});
+        handleFetchChats(memberSession, {common::CommandType::FetchChats, {}});
+    }
+    if (removedSession) {
+        sendToSession(removedSession, {common::CommandType::ChatRemoved, {message.fields[0], "removed from group"}});
+        handleFetchChats(removedSession, {common::CommandType::FetchChats, {}});
     }
     sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "member removed", message.fields[0]}});
 }
@@ -1476,17 +1517,21 @@ void MessengerServer::handleTransferGroupAdmin(const std::shared_ptr<ClientSessi
                                          groupName,
                                          memberUsernames,
                                          storageError);
-    const std::vector<std::string> incomingFields = {
-        std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
-        groupName, systemMessage.text, "", "", "", "", "", ""
-    };
-    std::lock_guard<std::mutex> lock(clientsMutex_);
-    for (const auto& member : memberUsernames) {
-        const auto it = onlineUsers_.find(member);
-        if (it != onlineUsers_.end()) {
-            sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
-            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+    const std::vector<std::string> incomingFields =
+        buildStoredMessageFields(systemMessage, message.fields[0], groupName);
+    std::vector<std::shared_ptr<ClientSession>> onlineMembers;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& member : memberUsernames) {
+            const auto it = onlineUsers_.find(member);
+            if (it != onlineUsers_.end()) {
+                onlineMembers.push_back(it->second);
+            }
         }
+    }
+    for (const auto& memberSession : onlineMembers) {
+        sendToSession(memberSession, {common::CommandType::IncomingMessage, incomingFields});
+        handleFetchChats(memberSession, {common::CommandType::FetchChats, {}});
     }
     sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "admin transferred", message.fields[0]}});
 }
@@ -1516,24 +1561,30 @@ void MessengerServer::handleLeaveGroup(const std::shared_ptr<ClientSession>& ses
                                          groupName,
                                          memberUsernames,
                                          storageError);
-    const std::vector<std::string> incomingFields = {
-        std::to_string(systemMessage.id), message.fields[0], systemMessage.createdAt, systemMessage.sender,
-        groupName, systemMessage.text, "", "", "", "", "", ""
-    };
+    const std::vector<std::string> incomingFields =
+        buildStoredMessageFields(systemMessage, message.fields[0], groupName);
+    std::vector<std::shared_ptr<ClientSession>> onlineMembers;
+    std::shared_ptr<ClientSession> selfSession;
     {
         std::lock_guard<std::mutex> lock(clientsMutex_);
         for (const auto& member : memberUsernames) {
             const auto it = onlineUsers_.find(member);
             if (it != onlineUsers_.end()) {
-                sendToSession(it->second, {common::CommandType::IncomingMessage, incomingFields});
-                handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+                onlineMembers.push_back(it->second);
             }
         }
         const auto selfIt = onlineUsers_.find(session->username);
         if (selfIt != onlineUsers_.end()) {
-            sendToSession(selfIt->second, {common::CommandType::ChatRemoved, {message.fields[0], "left group"}});
-            handleFetchChats(selfIt->second, {common::CommandType::FetchChats, {}});
+            selfSession = selfIt->second;
         }
+    }
+    for (const auto& memberSession : onlineMembers) {
+        sendToSession(memberSession, {common::CommandType::IncomingMessage, incomingFields});
+        handleFetchChats(memberSession, {common::CommandType::FetchChats, {}});
+    }
+    if (selfSession) {
+        sendToSession(selfSession, {common::CommandType::ChatRemoved, {message.fields[0], "left group"}});
+        handleFetchChats(selfSession, {common::CommandType::FetchChats, {}});
     }
     sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "left group", message.fields[0]}});
 }
@@ -1556,13 +1607,19 @@ void MessengerServer::handleDeleteGroup(const std::shared_ptr<ClientSession>& se
         sendToSession(session, {common::CommandType::GroupUpdateResult, {"error", storageError, message.fields[0]}});
         return;
     }
-    std::lock_guard<std::mutex> lock(clientsMutex_);
-    for (const auto& username : removedUsers) {
-        const auto it = onlineUsers_.find(username);
-        if (it != onlineUsers_.end()) {
-            sendToSession(it->second, {common::CommandType::ChatRemoved, {message.fields[0], "group deleted"}});
-            handleFetchChats(it->second, {common::CommandType::FetchChats, {}});
+    std::vector<std::shared_ptr<ClientSession>> removedSessions;
+    {
+        std::lock_guard<std::mutex> lock(clientsMutex_);
+        for (const auto& username : removedUsers) {
+            const auto it = onlineUsers_.find(username);
+            if (it != onlineUsers_.end()) {
+                removedSessions.push_back(it->second);
+            }
         }
+    }
+    for (const auto& removedSession : removedSessions) {
+        sendToSession(removedSession, {common::CommandType::ChatRemoved, {message.fields[0], "group deleted"}});
+        handleFetchChats(removedSession, {common::CommandType::FetchChats, {}});
     }
     sendToSession(session, {common::CommandType::GroupUpdateResult, {"ok", "group deleted", message.fields[0]}});
 }
@@ -1782,20 +1839,20 @@ void MessengerServer::removeSession(const std::shared_ptr<ClientSession>& sessio
         }
     }
 
-    closeSessionSocket(session);
+    closeSessionSocket(session, true);
 
     logEvent("client_disconnected username=" +
              (session->username.empty() ? "<anonymous>" : session->username) +
              " peer=" + session->peer);
 }
 
-void MessengerServer::closeSessionSocket(const std::shared_ptr<ClientSession>& session) {
+void MessengerServer::closeSessionSocket(const std::shared_ptr<ClientSession>& session, bool releaseTls) {
     if (!session) {
         return;
     }
 
     std::lock_guard<std::mutex> lock(session->writeMutex);
-    if (session->ssl) {
+    if (releaseTls && session->ssl) {
         SSL_free(session->ssl);
         session->ssl = nullptr;
     }
@@ -1906,9 +1963,24 @@ std::string MessengerServer::generatePasswordSalt() {
 }
 
 std::string MessengerServer::passwordHash(const std::string& password, const std::string& salt) {
-    // This is a salted FNV-1a based hash suitable for avoiding plain-text
-    // passwords in this coursework project. For production use, replace it with
-    // Argon2, bcrypt, scrypt or PBKDF2 from a vetted crypto library.
+    unsigned char derived[32] = {};
+    const int ok = PKCS5_PBKDF2_HMAC(password.c_str(),
+                                     static_cast<int>(password.size()),
+                                     reinterpret_cast<const unsigned char*>(salt.data()),
+                                     static_cast<int>(salt.size()),
+                                     kPasswordHashIterations,
+                                     EVP_sha256(),
+                                     sizeof(derived),
+                                     derived);
+    if (ok != 1) {
+        return "";
+    }
+
+    return "pbkdf2_sha256$" + std::to_string(kPasswordHashIterations) + "$" +
+           hexEncode(derived, sizeof(derived));
+}
+
+std::string MessengerServer::legacyPasswordHash(const std::string& password, const std::string& salt) {
     unsigned long long hash = 1469598103934665603ULL;
     const std::string data = salt + '\n' + password;
 
@@ -1925,6 +1997,16 @@ std::string MessengerServer::passwordHash(const std::string& password, const std
     std::ostringstream out;
     out << std::hex << std::setfill('0') << std::setw(16) << hash;
     return out.str();
+}
+
+bool MessengerServer::verifyPasswordHash(const std::string& password,
+                                         const std::string& salt,
+                                         const std::string& storedHash) {
+    if (storedHash.rfind("pbkdf2_sha256$", 0) == 0) {
+        return storedHash == passwordHash(password, salt);
+    }
+
+    return storedHash == legacyPasswordHash(password, salt);
 }
 
 std::string MessengerServer::currentTimestamp() {

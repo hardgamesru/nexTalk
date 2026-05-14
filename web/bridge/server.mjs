@@ -4,8 +4,42 @@ import { WebSocketServer } from "ws";
 const BRIDGE_PORT = Number.parseInt(process.env.BRIDGE_PORT ?? "5174", 10);
 const DEFAULT_HOST = process.env.NEXTALK_HOST ?? "127.0.0.1";
 const DEFAULT_TCP_PORT = Number.parseInt(process.env.NEXTALK_PORT ?? "5555", 10);
+const MAX_LINE_LENGTH = Number.parseInt(process.env.BRIDGE_MAX_LINE_LENGTH ?? "8192", 10);
+const ALLOWED_HOSTS = new Set(
+  (process.env.BRIDGE_ALLOWED_HOSTS ?? "127.0.0.1,localhost,::1")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
+const ALLOWED_ORIGINS = new Set(
+  (process.env.BRIDGE_ALLOWED_ORIGINS ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean),
+);
 
 const wss = new WebSocketServer({ host: "127.0.0.1", port: BRIDGE_PORT });
+
+function isAllowedOrigin(origin) {
+  if (!origin) {
+    return true;
+  }
+  if (ALLOWED_ORIGINS.has(origin)) {
+    return true;
+  }
+
+  try {
+    const { hostname, protocol } = new URL(origin);
+    return (protocol === "http:" || protocol === "https:") &&
+      (hostname === "localhost" || hostname === "127.0.0.1" || hostname === "::1");
+  } catch {
+    return false;
+  }
+}
+
+function isAllowedTcpTarget(host, port) {
+  return ALLOWED_HOSTS.has(host) && Number.isInteger(port) && port > 0 && port <= 65535;
+}
 
 function sendJson(ws, payload) {
   if (ws.readyState === ws.OPEN) {
@@ -13,7 +47,14 @@ function sendJson(ws, payload) {
   }
 }
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, request) => {
+  const origin = request.headers.origin ?? "";
+  if (!isAllowedOrigin(origin)) {
+    sendJson(ws, { type: "bridge_error", message: "WebSocket origin is not allowed" });
+    ws.close(1008, "origin not allowed");
+    return;
+  }
+
   let tcp = null;
   let readBuffer = "";
 
@@ -49,9 +90,19 @@ wss.on("connection", (ws) => {
 
       while (boundary >= 0) {
         const line = readBuffer.slice(0, boundary);
+        if (line.length > MAX_LINE_LENGTH) {
+          sendJson(ws, { type: "tcp_error", message: "TCP line is too large" });
+          closeTcp();
+          return;
+        }
         readBuffer = readBuffer.slice(boundary + 1);
         sendJson(ws, { type: "line", line });
         boundary = readBuffer.indexOf("\n");
+      }
+
+      if (readBuffer.length > MAX_LINE_LENGTH) {
+        sendJson(ws, { type: "tcp_error", message: "TCP line is too large" });
+        closeTcp();
       }
     });
 
@@ -85,6 +136,10 @@ wss.on("connection", (ws) => {
     if (payload.type === "connect") {
       const host = typeof payload.host === "string" && payload.host.trim() ? payload.host.trim() : DEFAULT_HOST;
       const port = Number.isInteger(payload.port) ? payload.port : DEFAULT_TCP_PORT;
+      if (!isAllowedTcpTarget(host, port)) {
+        sendJson(ws, { type: "bridge_error", message: "TCP target is not allowed" });
+        return;
+      }
       ensureConnected(host, port);
       return;
     }
@@ -101,6 +156,10 @@ wss.on("connection", (ws) => {
       }
 
       const line = String(payload.line ?? "");
+      if (line.length > MAX_LINE_LENGTH) {
+        sendJson(ws, { type: "bridge_error", message: "Protocol line is too large" });
+        return;
+      }
       const normalized = line.endsWith("\n") ? line : `${line}\n`;
       tcp.write(normalized);
       return;
