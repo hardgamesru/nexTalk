@@ -74,7 +74,10 @@ const AI_REWRITE_PRESETS = [
 ] as const;
 
 const bridgeUrl = computed(() => `ws://${window.location.hostname}:5174`);
-const aiServiceUrl = computed(() => `http://${window.location.hostname}:5000`);
+const aiServiceUrl = computed(() => {
+  const configuredUrl = import.meta.env.VITE_AI_SERVICE_URL;
+  return configuredUrl ? configuredUrl.replace(/\/$/, "") : `http://${window.location.hostname}:5050`;
+});
 
 // Данные подключения к C++ серверу. Web-клиент не ходит в TCP напрямую:
 // сначала он подключается к Node bridge, а bridge уже открывает TLS socket.

@@ -9,7 +9,9 @@ from providers import ProviderError, build_provider_from_env, normalize_messages
 
 
 HOST = os.getenv("AI_SERVICE_HOST", "127.0.0.1")
-PORT = int(os.getenv("AI_SERVICE_PORT", "5000"))
+# 5000 часто занят системными сервисами macOS, поэтому локальный AI endpoint
+# по умолчанию живет на 5050. При необходимости порт можно переопределить env.
+PORT = int(os.getenv("AI_SERVICE_PORT", "5050"))
 # Ограничения ниже защищают локальный сервис от слишком больших запросов из UI.
 MAX_BODY_BYTES = int(os.getenv("AI_SERVICE_MAX_BODY_BYTES", "65536"))
 MAX_MESSAGES = int(os.getenv("AI_SERVICE_MAX_MESSAGES", "24"))

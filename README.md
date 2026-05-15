@@ -188,8 +188,15 @@ GigaChat API (`Client ID:Client Secret`, закодированные в Base64)
 cd ai_service
 AI_PROVIDER=gigachat \
 GIGACHAT_AUTH_KEY=<ваш_ключ_авторизации> \
+GIGACHAT_VERIFY_SSL=0 \
 python3 app.py
+
 ```
+
+По умолчанию `ai_service` запускается на `127.0.0.1:5050`. Порт `5000` не
+используется как дефолт, потому что на macOS он часто занят системным сервисом.
+Если нужен другой порт, задайте `AI_SERVICE_PORT` и тот же URL во фронтенде через
+`VITE_AI_SERVICE_URL`.
 
 `GIGACHAT_AUTH_KEY` можно передать как сам Base64-ключ или как строку с
 префиксом `Basic ...`: service нормализует заголовок сам. Токен доступа
@@ -197,7 +204,7 @@ python3 app.py
 сразу, откройте:
 
 ```bash
-curl 'http://127.0.0.1:5000/health?check=1'
+curl 'http://127.0.0.1:5050/health?check=1'
 ```
 
 При успешной проверке ответ будет содержать `"status": "ok"` и
