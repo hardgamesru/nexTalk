@@ -38,7 +38,42 @@ NexTalk - клиент-серверный мессенджер для UNIX/POSIX
 - `common/` - общий протокол (парсинг/сериализация).
 - `web/` - Vue-фронтенд и bridge (`web/bridge/server.mjs`).
 - `docs/` - документация для отчета и сдачи.
+- `docs/screenshots/` - скриншоты для вставки в README.
 - `ai_service/` - локальный HTTP-сервис для AI-провайдеров (Ollama или GigaChat API).
+
+## Скриншоты
+
+### Регистрация
+
+![Регистрация](docs/screenshots/registration.png)
+
+### Web-режим
+
+![Подключение web-клиента](docs/screenshots/web_mode.png)
+
+### Основной интерфейс
+
+![Главный экран чата](docs/screenshots/interface.png)
+
+### Групповой чат
+
+![Групповой чат](docs/screenshots/groupchat.png)
+
+### Редактирование профиля
+
+![Редактирование профиля](docs/screenshots/profile.png)
+
+### AI-чат
+
+![NexTalk AI](docs/screenshots/ai_chat.png)
+
+### Быстрый AI-ответ
+
+![Быстрый AI-ответ](docs/screenshots/ai_answer.png)
+
+### Редактирование AI-ответа
+
+![Редактирование AI-ответа перед отправкой](docs/screenshots/ai_edit.png)
 
 ## Требования
 
